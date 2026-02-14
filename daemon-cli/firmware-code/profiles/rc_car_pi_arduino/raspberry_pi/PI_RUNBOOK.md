@@ -79,18 +79,23 @@ nohup python3 daemon-cli/firmware-code/profiles/rc_car_pi_arduino/raspberry_pi/m
 
 If your robot has a servo claw driven from the Pi GPIO (example: GPIO 18), run a second DAEMON node.
 
-Prereqs:
+Prereqs (recommended, works on Debian/RPiOS variants where `pigpio` may not exist):
 ```bash
 sudo apt-get update
-sudo apt-get install -y pigpio python3-gpiozero
-sudo systemctl enable --now pigpiod
+sudo apt-get install -y python3-gpiozero python3-lgpio
 ```
+
+Optional (if your distro provides pigpio and you want it):
+```bash
+apt-cache search pigpio | head
+```
+If you see `pigpio` and `pigpiod`, you can install and enable them, and then run the node with `--pin-factory pigpio`.
 
 Start the claw node on port `8767`:
 ```bash
 pkill -f claw_daemon_node.py || true
 nohup python3 daemon-cli/firmware-code/profiles/rc_car_pi_arduino/raspberry_pi/claw_daemon_node.py \
-  --gpio 18 --port 8767 --node-id arm > ~/claw_node.log 2>&1 &
+  --gpio 18 --port 8767 --node-id arm --pin-factory lgpio > ~/claw_node.log 2>&1 &
 ss -ltnp | egrep ':(8767)\\b' || true
 tail -n 60 ~/claw_node.log
 ```

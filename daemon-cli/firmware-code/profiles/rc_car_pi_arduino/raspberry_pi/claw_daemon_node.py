@@ -20,7 +20,33 @@ import time
 from dataclasses import dataclass
 
 from gpiozero import Servo
-from gpiozero.pins.pigpio import PiGPIOFactory
+
+
+def _resolve_pin_factory(preferred: str | None):
+    """
+    Prefer pigpio when available (smooth servos), but allow fallback on distros where
+    the `pigpio` apt package/daemon isn't available (e.g. some Debian/RPiOS variants).
+    """
+    pref = (preferred or "").strip().lower()
+
+    if pref in {"pigpio", ""}:
+        try:
+            from gpiozero.pins.pigpio import PiGPIOFactory  # type: ignore
+
+            return PiGPIOFactory()
+        except Exception:
+            pass
+
+    if pref in {"lgpio", ""}:
+        try:
+            from gpiozero.pins.lgpio import LGPIOFactory  # type: ignore
+
+            return LGPIOFactory()
+        except Exception:
+            pass
+
+    # Default gpiozero factory (RPiGPIOFactory) if installed.
+    return None
 
 
 def _now_ms() -> int:
@@ -66,9 +92,10 @@ class Claw:
         open_value: float,
         step: float,
         delay_s: float,
+        pin_factory: str | None,
     ):
-        self._factory = PiGPIOFactory()
-        self._servo = Servo(gpio_pin, pin_factory=self._factory)
+        self._factory = _resolve_pin_factory(pin_factory)
+        self._servo = Servo(gpio_pin, pin_factory=self._factory) if self._factory else Servo(gpio_pin)
         self._lock = threading.Lock()
         self._hold = float(hold_value)
         self._open = float(open_value)
@@ -272,6 +299,11 @@ def main() -> None:
     ap.add_argument("--node-id", default="arm", help="Manifest device.node_id")
     ap.add_argument("--name", default="rc-car-claw", help="Manifest device.name")
     ap.add_argument("--gpio", type=int, default=18, help="Servo GPIO pin (default: 18)")
+    ap.add_argument(
+        "--pin-factory",
+        default="auto",
+        help="GPIO backend: auto|pigpio|lgpio|default (default: auto)",
+    )
     ap.add_argument("--hold", type=float, default=-0.55, help="Hold (grip) position value")
     ap.add_argument("--open", type=float, default=-1.0, help="Open (release) position value")
     ap.add_argument("--step", type=float, default=0.02, help="Smoothing step size")
@@ -284,7 +316,12 @@ def main() -> None:
     manifest["device"]["node_id"] = args.node_id
     manifest["device"]["name"] = args.name
 
-    claw = Claw(args.gpio, args.hold, args.open, args.step, args.delay)
+    pf = args.pin_factory.strip().lower()
+    if pf == "auto":
+        pf = ""
+    if pf == "default":
+        pf = "default"
+    claw = Claw(args.gpio, args.hold, args.open, args.step, args.delay, pin_factory=pf if pf != "default" else None)
     watchdog = Watchdog(claw, args.watchdog_ms)
     threading.Thread(target=watchdog.loop, daemon=True).start()
 
@@ -300,4 +337,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

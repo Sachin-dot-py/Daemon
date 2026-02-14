@@ -1,0 +1,18 @@
+[Unit]
+Description=DAEMON RC Car Mecanum Node (base)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=treehacks
+WorkingDirectory=/home/treehacks/Daemon
+ExecStart=/usr/bin/python3 /home/treehacks/Daemon/daemon-cli/firmware-code/profiles/rc_car_pi_arduino/raspberry_pi/mecanum_daemon_node.py --serial /dev/ttyACM0 --baud 9600 --port 8766 --node-id base
+Restart=always
+RestartSec=1
+StandardOutput=append:/home/treehacks/mecanum_node.log
+StandardError=append:/home/treehacks/mecanum_node.log
+
+[Install]
+WantedBy=multi-user.target
+

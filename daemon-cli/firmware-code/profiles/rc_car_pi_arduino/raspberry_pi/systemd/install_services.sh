@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SYSTEMD_DIR="${PROFILE_DIR}/systemd"
+
+echo "Installing systemd services for DAEMON nodes..."
+echo "Source: ${SYSTEMD_DIR}"
+
+sudo install -m 0644 "${SYSTEMD_DIR}/daemon-mecanum.service" /etc/systemd/system/daemon-mecanum.service
+sudo install -m 0644 "${SYSTEMD_DIR}/daemon-claw.service" /etc/systemd/system/daemon-claw.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now daemon-mecanum.service
+sudo systemctl enable --now daemon-claw.service
+
+echo
+echo "Status:"
+sudo systemctl --no-pager status daemon-mecanum.service || true
+sudo systemctl --no-pager status daemon-claw.service || true
+
