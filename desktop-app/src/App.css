@@ -160,6 +160,42 @@ button:disabled {
   flex: 1;
 }
 
+.bridge-box {
+  margin-top: 10px;
+  border: 1px solid #d1dfec;
+  border-radius: 8px;
+  padding: 8px;
+  background: #f5f9fd;
+}
+
+.bridge-box h3 {
+  margin: 0 0 8px;
+  font-size: 0.94rem;
+}
+
+.bridge-config {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.bridge-config input {
+  width: 100%;
+}
+
+.bridge-pad {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bridge-status {
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: #2f4960;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -275,5 +311,9 @@ button:disabled {
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+  }
+
+  .bridge-config {
+    grid-template-columns: 1fr;
   }
 }

@@ -15,12 +15,32 @@ Tauri + React desktop app for DAEMON-enabled devices.
   - Request webcam + microphone and show local live preview
   - Stream periodic observation frames + audio level + telemetry to Vercel API evaluator
   - Receive `MATCH` or code-update suggestion and retry with one click
+- Pi mecanum bridge mode:
+  - Dispatch `F/B/L/R/Q/E/S` motor commands over TCP to a Raspberry Pi bridge on the same network
+  - Bridge keeps the Arduino serial port open (more reliable than opening on each command)
 
 ## Run
 ```bash
 npm install
 npm run tauri dev
 ```
+
+## Pi bridge setup (mecanum)
+
+On the Raspberry Pi, run:
+
+```bash
+python3 daemon-cli/firmware-code/profiles/rc_car_pi_arduino/raspberry_pi/mecanum_bridge_server.py \
+  --serial /dev/ttyACM0 \
+  --baud 9600 \
+  --port 8765 \
+  --token treehacks
+```
+
+In the desktop app, set:
+- Host: Pi IP (preferred) or hostname
+- Port: `8765`
+- Token: `treehacks` (match `--token`)
 
 ## Realtime evaluator configuration
 

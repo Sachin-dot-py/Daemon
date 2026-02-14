@@ -104,6 +104,73 @@ function planCommands(prompt, manifest) {
   return plan;
 }
 
+function extractDurationMs(text, defaultDurationMs) {
+  const durationMatch = text.match(/(\d+(?:\.\d+)?)\s*(ms|millisecond|milliseconds|s|sec|second|seconds)?\b/i);
+  if (!durationMatch) {
+    return defaultDurationMs;
+  }
+
+  const value = Number(durationMatch[1]);
+  if (!Number.isFinite(value) || value <= 0) {
+    return defaultDurationMs;
+  }
+
+  const unit = (durationMatch[2] || "ms").toLowerCase();
+  if (unit === "s" || unit === "sec" || unit === "second" || unit === "seconds") {
+    return Math.round(value * 1000);
+  }
+
+  return Math.round(value);
+}
+
+function planMecanumCommands(prompt, defaultDurationMs) {
+  const normalized = prompt.trim().toLowerCase();
+  if (!normalized) {
+    return [];
+  }
+
+  const parts = normalized.split(/\bthen\b|\band then\b|,/).map((part) => part.trim()).filter(Boolean);
+  const plan = [];
+
+  for (const part of parts) {
+    if (part.includes("stop")) {
+      plan.push({ command: "S", durationMs: 0 });
+      continue;
+    }
+
+    if (part.includes("rotate left") || part.includes("turn left") || part.includes("spin left")) {
+      plan.push({ command: "Q", durationMs: extractDurationMs(part, defaultDurationMs) });
+      continue;
+    }
+
+    if (part.includes("rotate right") || part.includes("turn right") || part.includes("spin right")) {
+      plan.push({ command: "E", durationMs: extractDurationMs(part, defaultDurationMs) });
+      continue;
+    }
+
+    if (part.includes("strafe left") || part.includes("slide left")) {
+      plan.push({ command: "L", durationMs: extractDurationMs(part, defaultDurationMs) });
+      continue;
+    }
+
+    if (part.includes("strafe right") || part.includes("slide right")) {
+      plan.push({ command: "R", durationMs: extractDurationMs(part, defaultDurationMs) });
+      continue;
+    }
+
+    if (part.includes("back") || part.includes("reverse")) {
+      plan.push({ command: "B", durationMs: extractDurationMs(part, defaultDurationMs) });
+      continue;
+    }
+
+    if (part.includes("forward") || part.includes("ahead")) {
+      plan.push({ command: "F", durationMs: extractDurationMs(part, defaultDurationMs) });
+    }
+  }
+
+  return plan;
+}
+
 function safeTrimmedTail(items, size) {
   return (items || []).slice(-size).map((entry) => String(entry));
 }
@@ -139,6 +206,14 @@ function App() {
   const [suggestedCode, setSuggestedCode] = useState("");
   const [patchSummary, setPatchSummary] = useState("");
   const [evalHistory, setEvalHistory] = useState([]);
+  const [bridgeHost, setBridgeHost] = useState("vporto26.local");
+  const [bridgePort, setBridgePort] = useState("8765");
+  const [bridgeToken, setBridgeToken] = useState("treehacks");
+  const [bridgeMoveMs, setBridgeMoveMs] = useState("500");
+  const [bridgeBusy, setBridgeBusy] = useState(false);
+  const [bridgeStatus, setBridgeStatus] = useState("idle");
+  const [bridgeConnected, setBridgeConnected] = useState(false);
+  const [controlMode, setControlMode] = useState("pi");
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -170,6 +245,93 @@ function App() {
     ]);
   };
 
+  const parseBridgePort = () => {
+    const value = Number.parseInt(bridgePort, 10);
+    if (!Number.isFinite(value) || value < 1 || value > 65535) {
+      return 8765;
+    }
+    return value;
+  };
+
+  const parseBridgeMoveMs = () => {
+    const value = Number.parseInt(bridgeMoveMs, 10);
+    if (!Number.isFinite(value) || value < 0 || value > 10000) {
+      return 500;
+    }
+    return value;
+  };
+
+  const sendMecanumCommand = async (command, overrideDurationMs) => {
+    setBridgeBusy(true);
+    try {
+      const durationMs = overrideDurationMs ?? parseBridgeMoveMs();
+      const result = await invoke("send_mecanum_via_pi_bridge", {
+        // Backend will reuse persistent connection if already established.
+        host: bridgeHost.trim(),
+        port: parseBridgePort(),
+        token: bridgeToken.trim(),
+        command,
+        durationMs
+      });
+
+      setBridgeStatus(`sent ${result.command} (${result.durationMs}ms) to ${result.target}`);
+      setBridgeConnected(true);
+      pushLog(`PI ${result.target} ${result.command} ${result.durationMs}ms`);
+      setErrorText("");
+      return true;
+    } catch (error) {
+      const message = String(error);
+      setErrorText(message);
+      setBridgeStatus(`dispatch failed: ${message}`);
+      setBridgeConnected(false);
+      pushLog(`PI ERR ${message}`);
+      return false;
+    } finally {
+      setBridgeBusy(false);
+    }
+  };
+
+  const connectBridge = async () => {
+    setBridgeBusy(true);
+    try {
+      const status = await invoke("connect_pi_bridge", {
+        host: bridgeHost.trim(),
+        port: parseBridgePort(),
+        token: bridgeToken.trim()
+      });
+      setBridgeConnected(Boolean(status.connected));
+      setBridgeStatus(status.connected ? `connected to ${status.target}` : "disconnected");
+      pushLog(`PI CONNECT ${status.target || ""}`.trim());
+      setErrorText("");
+    } catch (error) {
+      const message = String(error);
+      setBridgeConnected(false);
+      setBridgeStatus(`connect failed: ${message}`);
+      setErrorText(message);
+      pushLog(`PI CONNECT_ERR ${message}`);
+    } finally {
+      setBridgeBusy(false);
+    }
+  };
+
+  const disconnectBridge = async () => {
+    setBridgeBusy(true);
+    try {
+      await invoke("disconnect_pi_bridge");
+      setBridgeConnected(false);
+      setBridgeStatus("disconnected");
+      pushLog("PI DISCONNECT");
+      setErrorText("");
+    } catch (error) {
+      const message = String(error);
+      setBridgeStatus(`disconnect failed: ${message}`);
+      setErrorText(message);
+      pushLog(`PI DISCONNECT_ERR ${message}`);
+    } finally {
+      setBridgeBusy(false);
+    }
+  };
+
   const callRealtimeApi = async (payload) => {
     const response = await fetch(`${API_BASE_URL}/api/realtime/evaluate`, {
       method: "POST",
@@ -183,6 +345,25 @@ function App() {
       throw new Error(message);
     }
 
+    return body;
+  };
+
+  const callMecanumPlannerApi = async (instruction) => {
+    const response = await fetch(`${API_BASE_URL}/api/mecanum/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction,
+        default_duration_ms: parseBridgeMoveMs(),
+        max_steps: 28
+      })
+    });
+
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message = body?.message || `Mecanum planner request failed (${response.status})`;
+      throw new Error(message);
+    }
     return body;
   };
 
@@ -425,6 +606,15 @@ function App() {
       })
       .catch(() => {});
 
+    invoke("get_pi_bridge_status")
+      .then((status) => {
+        setBridgeConnected(Boolean(status.connected));
+        if (status.connected && status.target) {
+          setBridgeStatus(`connected to ${status.target}`);
+        }
+      })
+      .catch(() => {});
+
     return () => {
       clearObserveLoop();
       stopMediaCapture();
@@ -479,35 +669,89 @@ function App() {
 
   const sendInstruction = async () => {
     const prompt = draft.trim();
-    if (!prompt || !connectedPort) {
+    if (!prompt) {
       return;
     }
-
-    const plan = planCommands(prompt, manifest);
 
     setChat((prev) => [...prev, { role: "user", content: prompt }]);
     setDraft("");
 
-    if (!plan.length) {
-      setChat((prev) => [...prev, { role: "assistant", content: "No matching command found in manifest catalog." }]);
+    if (controlMode === "serial") {
+      if (!connectedPort) {
+        setChat((prev) => [...prev, { role: "assistant", content: "Serial mode selected, but no serial device is connected." }]);
+        return;
+      }
+
+      const plan = planCommands(prompt, manifest);
+
+      if (!plan.length) {
+        setChat((prev) => [...prev, { role: "assistant", content: "No matching command found in manifest catalog." }]);
+        return;
+      }
+
+      const planText = plan.map((step) => `RUN ${step.token}${step.args.length ? ` ${step.args.join(" ")}` : ""}`).join(" | ");
+      const codeBlock = `${plan.map((step) => `RUN ${step.token}${step.args.length ? ` ${step.args.join(" ")}` : ""}`).join("\n")}\nSTOP`;
+      setModelCode(codeBlock);
+      setChat((prev) => [...prev, { role: "assistant", content: `Plan: ${planText}` }]);
+
+      for (const step of plan) {
+        try {
+          if (step.token === "STOP") {
+            await invoke("send_serial_line", { line: "STOP" });
+          } else {
+            const line = `RUN ${step.token}${step.args.length ? ` ${step.args.join(" ")}` : ""}`;
+            await invoke("send_serial_line", { line });
+          }
+        } catch (error) {
+          setChat((prev) => [...prev, { role: "assistant", content: `Send failed: ${String(error)}` }]);
+        }
+      }
       return;
     }
 
-    const planText = plan.map((step) => `RUN ${step.token}${step.args.length ? ` ${step.args.join(" ")}` : ""}`).join(" | ");
-    const codeBlock = `${plan.map((step) => `RUN ${step.token}${step.args.length ? ` ${step.args.join(" ")}` : ""}`).join("\n")}\nSTOP`;
-    setModelCode(codeBlock);
-    setChat((prev) => [...prev, { role: "assistant", content: `Plan: ${planText}` }]);
-
-    for (const step of plan) {
+    const mecanumPlan = planMecanumCommands(prompt, parseBridgeMoveMs());
+    if (!mecanumPlan.length) {
       try {
-        if (step.token === "STOP") {
-          await invoke("send_serial_line", { line: "STOP" });
-        } else {
-          const line = `RUN ${step.token}${step.args.length ? ` ${step.args.join(" ")}` : ""}`;
-          await invoke("send_serial_line", { line });
+        setChat((prev) => [...prev, { role: "assistant", content: "Planning with model..." }]);
+        const planned = await callMecanumPlannerApi(prompt);
+        const steps = Array.isArray(planned?.plan) ? planned.plan : [];
+        const explanation = typeof planned?.explanation === "string" ? planned.explanation : "Planned motion.";
+
+        const normalized = steps
+          .map((step) => ({
+            command: String(step?.cmd || "").trim().toUpperCase(),
+            durationMs: Number(step?.duration_ms)
+          }))
+          .filter((step) => ["F", "B", "L", "R", "Q", "E", "S"].includes(step.command) && Number.isFinite(step.durationMs));
+
+        if (!normalized.length) {
+          setChat((prev) => [...prev, { role: "assistant", content: "Planner returned no valid steps." }]);
+          return;
         }
+
+        setChat((prev) => [...prev, { role: "assistant", content: `Pi plan: ${explanation}` }]);
+        for (const step of normalized) {
+          const sent = await sendMecanumCommand(step.command, step.durationMs);
+          if (!sent) {
+            setChat((prev) => [...prev, { role: "assistant", content: `Pi command ${step.command} failed.` }]);
+            break;
+          }
+        }
+        return;
       } catch (error) {
-        setChat((prev) => [...prev, { role: "assistant", content: `Send failed: ${String(error)}` }]);
+        setChat((prev) => [...prev, { role: "assistant", content: `Planner failed: ${String(error)}` }]);
+        return;
+      }
+    }
+
+    const summary = mecanumPlan.map((step) => `${step.command}${step.durationMs ? `(${step.durationMs}ms)` : ""}`).join(" -> ");
+    setChat((prev) => [...prev, { role: "assistant", content: `Pi plan: ${summary}` }]);
+
+    for (const step of mecanumPlan) {
+      const sent = await sendMecanumCommand(step.command, step.durationMs);
+      if (!sent) {
+        setChat((prev) => [...prev, { role: "assistant", content: `Pi command ${step.command} failed.` }]);
+        break;
       }
     }
   };
@@ -611,9 +855,13 @@ function App() {
                 <strong>{message.role === "user" ? "You" : "Agent"}:</strong> {message.content}
               </div>
             ))}
-            {!chat.length && <div className="empty">Send a natural language command after connecting.</div>}
+            {!chat.length && <div className="empty">Send a natural language command for serial manifest mode or Pi mecanum mode.</div>}
           </div>
           <div className="composer">
+            <select value={controlMode} onChange={(event) => setControlMode(event.target.value)}>
+              <option value="pi">Pi Bridge Mode</option>
+              <option value="serial">Serial Device Mode</option>
+            </select>
             <input
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
@@ -624,8 +872,43 @@ function App() {
                 }
               }}
             />
-            <button onClick={sendInstruction} disabled={!connectedPort}>Send</button>
-            <button onClick={() => invoke("send_serial_line", { line: "STOP" })} disabled={!connectedPort}>STOP</button>
+            <button onClick={sendInstruction} disabled={controlMode === "pi" ? bridgeBusy : !connectedPort}>Send</button>
+            <button
+              onClick={() => {
+                if (controlMode === "serial" && connectedPort) {
+                  invoke("send_serial_line", { line: "STOP" });
+                } else {
+                  sendMecanumCommand("S", 0);
+                }
+              }}
+              disabled={controlMode === "pi" ? bridgeBusy : !connectedPort}
+            >
+              STOP
+            </button>
+          </div>
+
+          <div className="bridge-box">
+            <h3>Pi Mecanum Bridge</h3>
+            <div className="bridge-config">
+              <input value={bridgeHost} onChange={(event) => setBridgeHost(event.target.value)} placeholder="pi host (prefer IP)" />
+              <input value={bridgePort} onChange={(event) => setBridgePort(event.target.value)} placeholder="bridge port" />
+              <input value={bridgeToken} onChange={(event) => setBridgeToken(event.target.value)} placeholder="bridge token" />
+              <input value={bridgeMoveMs} onChange={(event) => setBridgeMoveMs(event.target.value)} placeholder="move ms" />
+            </div>
+            <div className="bridge-pad">
+              {!bridgeConnected && <button onClick={connectBridge} disabled={bridgeBusy}>Connect Bridge</button>}
+              {bridgeConnected && <button onClick={disconnectBridge} disabled={bridgeBusy}>Disconnect Bridge</button>}
+            </div>
+            <div className="bridge-pad">
+              <button onClick={() => sendMecanumCommand("F")} disabled={bridgeBusy}>Forward (F)</button>
+              <button onClick={() => sendMecanumCommand("B")} disabled={bridgeBusy}>Backward (B)</button>
+              <button onClick={() => sendMecanumCommand("L")} disabled={bridgeBusy}>Strafe Left (L)</button>
+              <button onClick={() => sendMecanumCommand("R")} disabled={bridgeBusy}>Strafe Right (R)</button>
+              <button onClick={() => sendMecanumCommand("Q")} disabled={bridgeBusy}>Rotate Left (Q)</button>
+              <button onClick={() => sendMecanumCommand("E")} disabled={bridgeBusy}>Rotate Right (E)</button>
+              <button onClick={() => sendMecanumCommand("S", 0)} disabled={bridgeBusy}>Stop (S)</button>
+            </div>
+            <div className="bridge-status">Bridge: {bridgeBusy ? "working..." : bridgeStatus}</div>
           </div>
         </section>
 
