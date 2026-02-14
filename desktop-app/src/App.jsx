@@ -224,6 +224,7 @@ function App() {
   const stateRef = useRef(INITIAL_STATE);
 
   const [taskPrompt, setTaskPrompt] = useState(DEFAULT_PROMPT);
+  const [draftPrompt, setDraftPrompt] = useState(DEFAULT_PROMPT);
   const [captureIntervalMs] = useState(DEFAULT_CAPTURE_INTERVAL_MS);
   const [liveEnabled, setLiveEnabled] = useState(false);
   const [sendingFrames, setSendingFrames] = useState(false);
@@ -241,6 +242,7 @@ function App() {
   const [errorText, setErrorText] = useState("");
 
   const promptReady = taskPrompt.trim().length > 0;
+  const draftReady = draftPrompt.trim().length > 0;
 
   const statusText = useMemo(() => {
     if (!liveEnabled) {
@@ -253,8 +255,18 @@ function App() {
     if (!taskPrompt.trim()) {
       return "Enter a task prompt to start.";
     }
-    return "Live instruction is sent on every frame. Edit mid-run to change behavior on the next frame.";
+    return `Applied prompt: "${taskPrompt}". Edit text and click Send to update behavior on the next frame.`;
   }, [taskPrompt]);
+
+  const applyPrompt = () => {
+    const next = draftPrompt.trim();
+    if (!next) {
+      setErrorText("Task prompt is required.");
+      return;
+    }
+    setTaskPrompt(next);
+    setErrorText("");
+  };
 
   useEffect(() => {
     drawOverlay(overlayCanvasRef.current, perception, lastDebug);
@@ -487,11 +499,26 @@ function App() {
         <div className="prompt-row">
           <input
             id="taskPrompt"
-            value={taskPrompt}
-            onChange={(event) => setTaskPrompt(event.target.value)}
+            value={draftPrompt}
+            onChange={(event) => setDraftPrompt(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                applyPrompt();
+              }
+            }}
             placeholder="pick up the banana"
           />
-          <button className="ghost" onClick={() => setTaskPrompt(DEFAULT_PROMPT)}>Reset</button>
+          <button className="secondary" onClick={applyPrompt} disabled={!draftReady}>Send</button>
+          <button
+            className="ghost"
+            onClick={() => {
+              setDraftPrompt(DEFAULT_PROMPT);
+              setTaskPrompt(DEFAULT_PROMPT);
+            }}
+          >
+            Reset
+          </button>
         </div>
         <p className="note">{capabilityNote}</p>
       </section>

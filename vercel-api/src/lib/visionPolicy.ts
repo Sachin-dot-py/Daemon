@@ -277,6 +277,34 @@ export function selectTargetDeterministic(
     return { obj, score };
   });
 
+  const targetRequired =
+    (parsed.task_type === "pick-object" ||
+      parsed.task_type === "follow" ||
+      parsed.task_type === "search" ||
+      parsed.task_type === "avoid+approach") &&
+    Boolean(targetLabel || queryTokens.length > 0 || targetColor);
+
+  const matchesTarget = (candidate: PerceivedObject): boolean => {
+    const label = canonicalLabel(candidate.label);
+    const attrs = (candidate.attributes || []).map((v) => v.toLowerCase());
+    const labelMatch = Boolean(targetLabel && (label === targetLabel || label.includes(targetLabel)));
+    const queryMatch = queryTokens.length > 0 && queryTokens.some((token) => label.includes(token));
+    const colorMatch = Boolean(targetColor && (label.includes(targetColor) || attrs.some((a) => a.includes(targetColor))));
+    return labelMatch || queryMatch || colorMatch;
+  };
+
+  if (targetRequired) {
+    const filtered = scored.filter(({ obj }) => matchesTarget(obj));
+    if (filtered.length > 0) {
+      filtered.sort((a, b) => b.score - a.score);
+      const bestFiltered = filtered[0];
+      if (bestFiltered.score >= 0.2) {
+        return bestFiltered.obj;
+      }
+    }
+    return undefined;
+  }
+
   scored.sort((a, b) => b.score - a.score);
   const best = scored[0];
   if (!best || best.score < 0.2) {
