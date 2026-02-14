@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde_json::{json, Value};
 use serialport::SerialPort;
 use std::io::{Read, Write};
 use std::sync::{mpsc, Arc, Mutex};
@@ -57,6 +58,53 @@ fn stop_session_locked(slot: &mut Option<SerialSession>) {
     if let Some(session) = slot.take() {
         let _ = session.stop_tx.send(());
     }
+}
+
+fn normalize_base_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("orchestrator_base_url is empty".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+async fn orchestrator_request(
+    method: reqwest::Method,
+    orchestrator_base_url: String,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Value, String> {
+    let base = normalize_base_url(&orchestrator_base_url)?;
+    let url = format!("{base}{path}");
+    let client = reqwest::Client::new();
+    let request = client.request(method.clone(), &url);
+    let request = if let Some(payload) = body {
+        request.json(&payload)
+    } else {
+        request
+    };
+
+    let response = request.send().await.map_err(|error| {
+        format!("{method} {url} failed: network error: {error}")
+    })?;
+
+    let status = response.status();
+    let response_text = response
+        .text()
+        .await
+        .map_err(|error| format!("{method} {url} failed: could not read response body: {error}"))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "{method} {url} failed: HTTP {} body={}",
+            status.as_u16(),
+            response_text
+        ));
+    }
+
+    serde_json::from_str::<Value>(&response_text).map_err(|error| {
+        format!("{method} {url} failed: invalid JSON response: {error}; body={response_text}")
+    })
 }
 
 #[tauri::command]
@@ -190,6 +238,36 @@ fn send_serial_line(state: State<'_, AppState>, line: String) -> Result<(), Stri
     Ok(())
 }
 
+#[tauri::command]
+async fn orchestrator_status(orchestrator_base_url: String) -> Result<Value, String> {
+    orchestrator_request(reqwest::Method::GET, orchestrator_base_url, "/status", None).await
+}
+
+#[tauri::command]
+async fn orchestrator_execute_plan(
+    orchestrator_base_url: String,
+    plan: Value,
+) -> Result<Value, String> {
+    orchestrator_request(
+        reqwest::Method::POST,
+        orchestrator_base_url,
+        "/execute_plan",
+        Some(json!({ "plan": plan })),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn orchestrator_stop(orchestrator_base_url: String) -> Result<Value, String> {
+    orchestrator_request(
+        reqwest::Method::POST,
+        orchestrator_base_url,
+        "/stop",
+        Some(json!({})),
+    )
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -200,7 +278,10 @@ pub fn run() {
             connect_serial,
             disconnect_serial,
             get_connection_status,
-            send_serial_line
+            send_serial_line,
+            orchestrator_status,
+            orchestrator_execute_plan,
+            orchestrator_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
