@@ -27,13 +27,21 @@ class NodeInfo:
     node_name: str = ""
     node_id: str = ""
     telemetry_snapshot: dict[str, str] = field(default_factory=dict)
+    telemetry_subscribed: bool = False
 
 
 class Orchestrator:
-    def __init__(self, nodes: list[NodeInfo], telemetry: bool = False, timeout_s: float = 3.0):
+    def __init__(
+        self,
+        nodes: list[NodeInfo],
+        telemetry: bool = False,
+        timeout_s: float = 3.0,
+        step_timeout_s: float = 1.0,
+    ):
         self.nodes = nodes
         self.enable_telemetry = telemetry
         self.timeout_s = timeout_s
+        self.step_timeout_s = step_timeout_s
         self.catalog_qualified: dict[str, NodeInfo] = {}
         self.catalog_unqualified: dict[str, NodeInfo] = {}
 
@@ -44,6 +52,12 @@ class Orchestrator:
 
     def close_all(self) -> None:
         for node in self.nodes:
+            if self.enable_telemetry and node.telemetry_subscribed and node.running:
+                try:
+                    self._request(node, "UNSUB TELEMETRY", timeout=0.5)
+                except Exception:
+                    pass
+                node.telemetry_subscribed = False
             node.running = False
             if node.sock is not None:
                 try:
@@ -99,18 +113,20 @@ class Orchestrator:
             ack = self._request(node, "SUB TELEMETRY")
             if ack != "OK":
                 raise RuntimeError(f"{node.alias}: failed to subscribe telemetry: {ack}")
+            node.telemetry_subscribed = True
 
         print(
             f"connected {node.alias} -> name={node.node_name} node_id={node.node_id} commands="
             f"{','.join(cmd.get('token', '') for cmd in manifest.get('commands', []))}"
         )
 
-    def _request(self, node: NodeInfo, line: str) -> str:
+    def _request(self, node: NodeInfo, line: str, timeout: float | None = None) -> str:
         assert node.sock is not None
         with node.write_lock:
             node.sock.sendall((line + "\n").encode("utf-8"))
         try:
-            return node.rx_queue.get(timeout=self.timeout_s)
+            wait = self.timeout_s if timeout is None else timeout
+            return node.rx_queue.get(timeout=wait)
         except queue.Empty as exc:
             raise RuntimeError(f"{node.alias}: timeout waiting for response to '{line}'") from exc
 
@@ -141,7 +157,7 @@ class Orchestrator:
                     "name": node.node_name or node.alias,
                     "node_id": node.node_id or node.alias,
                     "commands": node.manifest.get("commands", []),
-                    "telemetry": dict(node.telemetry_snapshot),
+                    "telemetry": node.manifest.get("telemetry", {}),
                 }
             )
 
@@ -159,7 +175,7 @@ class Orchestrator:
 
     def _node_from_target(self, target: str) -> NodeInfo | None:
         for node in self.nodes:
-            if target in {node.alias, node.node_name, node.node_id}:
+            if target == node.node_name:
                 return node
         return None
 
@@ -284,6 +300,7 @@ class Orchestrator:
                     raise RuntimeError(f"step[{index}] duration_ms must be numeric") from exc
                 if duration < 0:
                     raise RuntimeError(f"step[{index}] duration_ms must be >= 0")
+                step["duration_ms"] = duration
 
     def resolve_node(self, target: str | None, token: str) -> NodeInfo:
         token_u = token.upper()
@@ -329,26 +346,33 @@ class Orchestrator:
         node = self.resolve_node(target, token)
 
         wire = ["RUN", token] + [str(arg) for arg in args]
-        response = self._request(node, " ".join(wire))
+        response = self._request(node, " ".join(wire), timeout=self.step_timeout_s)
         if response != "OK":
             raise RuntimeError(f"{node.alias}: RUN failed -> {response}")
 
         if duration_ms is not None:
             delay = max(0.0, float(duration_ms) / 1000.0)
             time.sleep(delay)
-            stop_resp = self._request(node, "STOP")
+            stop_resp = self._request(node, "STOP", timeout=self.step_timeout_s)
             if stop_resp != "OK":
                 raise RuntimeError(f"{node.alias}: STOP after duration failed -> {stop_resp}")
 
     def execute_plan(self, plan: list[dict[str, Any]]) -> None:
-        for step in plan:
-            self.run_step(step)
+        for index, step in enumerate(plan):
+            try:
+                self.run_step(step)
+            except Exception as exc:
+                try:
+                    self.emergency_stop()
+                except Exception as stop_exc:
+                    raise RuntimeError(f"step[{index}] failed: {exc}; panic STOP failed: {stop_exc}") from exc
+                raise RuntimeError(f"step[{index}] failed: {exc}; panic STOP sent") from exc
 
     def emergency_stop(self) -> None:
         errors: list[str] = []
         for node in self.nodes:
             try:
-                response = self._request(node, "STOP")
+                response = self._request(node, "STOP", timeout=0.8)
                 if response != "OK":
                     errors.append(f"{node.alias}:{response}")
             except Exception as exc:
@@ -388,6 +412,8 @@ def call_remote_planner(planner_url: str, instruction: str, system_manifest: dic
     )
 
     with urllib.request.urlopen(request, timeout=5) as response:
+        if response.status != 200:
+            raise RuntimeError(f"Planner returned HTTP {response.status}")
         body = response.read().decode("utf-8")
     parsed = json.loads(body)
     if not isinstance(parsed, dict) or "plan" not in parsed or not isinstance(parsed["plan"], list):
@@ -454,7 +480,15 @@ def repl(orchestrator: Orchestrator, planner_url: str | None) -> None:
     print("orchestrator ready. Type instructions, 'stop' for emergency stop, 'exit' to quit.")
     while True:
         try:
-            line = input("instruction> ").strip()
+            line = input("daemon> ").strip()
+        except KeyboardInterrupt:
+            print("\nCtrl+C received, issuing STOP to all nodes...")
+            try:
+                orchestrator.emergency_stop()
+                print("global stop sent")
+            except Exception as exc:
+                print(f"stop error: {exc}")
+            break
         except EOFError:
             print()
             break
@@ -485,6 +519,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--node", action="append", required=True, help="Node endpoint as alias=host:port")
     parser.add_argument("--planner-url", default=None, help="Remote planner URL (e.g. https://.../plan)")
     parser.add_argument("--telemetry", action="store_true", help="Subscribe to node telemetry and print it")
+    parser.add_argument("--instruction", default=None, help="One-shot instruction (non-interactive)")
+    parser.add_argument("--step-timeout", type=float, default=1.0, help="Per-step RUN/STOP response timeout (seconds)")
     return parser.parse_args()
 
 
@@ -492,10 +528,25 @@ def main() -> None:
     args = parse_args()
     nodes = [parse_node_arg(raw) for raw in args.node]
 
-    orchestrator = Orchestrator(nodes=nodes, telemetry=args.telemetry)
+    orchestrator = Orchestrator(nodes=nodes, telemetry=args.telemetry, step_timeout_s=args.step_timeout)
     try:
         orchestrator.connect_all()
-        repl(orchestrator, args.planner_url)
+        if args.instruction:
+            planned = make_plan(args.instruction, orchestrator, args.planner_url)
+            plan = planned.get("plan", [])
+            print(json.dumps(planned, indent=2))
+            orchestrator.validate_plan(plan)
+            orchestrator.execute_plan(plan)
+            print("plan executed")
+        else:
+            repl(orchestrator, args.planner_url)
+    except KeyboardInterrupt:
+        print("\nCtrl+C received, issuing STOP to all nodes...")
+        try:
+            orchestrator.emergency_stop()
+            print("global stop sent")
+        except Exception as exc:
+            print(f"stop error: {exc}")
     finally:
         orchestrator.close_all()
 

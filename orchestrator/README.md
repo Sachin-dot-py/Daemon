@@ -9,6 +9,7 @@ Local multi-node runtime glue for DAEMON node endpoints.
 - Executes `RUN` and `STOP` steps with optional `duration_ms`
 - Optional telemetry subscription with per-node prefixed output
 - Optional remote planner URL; local fallback planner if remote is unavailable
+- Strict plan validation against per-node manifest command/arg schemas
 
 ## Demo run
 0. (YAML manifest support dependency)
@@ -28,7 +29,10 @@ python daemon-cli/examples/node-emulator/emulator.py --port 7778 --manifest daem
 
 3. Run orchestrator:
 ```bash
-python orchestrator/orchestrator.py --node base=localhost:7777 --node arm=localhost:7778
+python orchestrator/orchestrator.py \
+  --node base=localhost:7777 \
+  --node arm=localhost:7778 \
+  --planner-url https://<domain>/api/plan
 ```
 
 4. Try instruction in REPL:
@@ -39,5 +43,7 @@ forward then turn left then close gripper
 ## Optional flags
 - `--telemetry` subscribe to all node telemetry streams
 - `--planner-url https://<domain>/api/plan` call remote planner first
+- `--instruction \"forward then close gripper\"` one-shot mode (no REPL)
+- `--step-timeout 1.0` per-step RUN/STOP response timeout in seconds
 
-If planner call fails or is not provided, fallback planner is used.
+If planner URL is down/unreachable/invalid, orchestrator prints a warning and falls back to local planning.
