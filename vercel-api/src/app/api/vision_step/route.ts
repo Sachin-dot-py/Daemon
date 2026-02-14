@@ -675,7 +675,7 @@ async function detectObjectsWithOpenAI(frameBase64: string, instruction: string)
               items: { type: "string" }
             }
           },
-          required: ["label", "confidence", "bbox"]
+          required: ["label", "confidence", "bbox", "attributes"]
         }
       }
     },
