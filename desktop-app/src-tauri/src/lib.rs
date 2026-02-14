@@ -190,6 +190,45 @@ fn send_serial_line(state: State<'_, AppState>, line: String) -> Result<(), Stri
     Ok(())
 }
 
+#[tauri::command]
+fn deploy_code_to_device(state: State<'_, AppState>, code: String) -> Result<u32, String> {
+    let normalized = code.replace("\r\n", "\n");
+    let lines = normalized.lines().collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        return Err("No code content to deploy".to_string());
+    }
+
+    let lock = state.session.lock().map_err(|_| "State lock poisoned".to_string())?;
+    let Some(session) = &*lock else {
+        return Err("No active serial connection".to_string());
+    };
+
+    let mut writer = session
+        .writer
+        .lock()
+        .map_err(|_| "Serial writer lock poisoned".to_string())?;
+
+    writer
+        .write_all(format!("BEGIN_CODE_UPLOAD {}\n", lines.len()).as_bytes())
+        .map_err(|error| format!("Serial write failed: {error}"))?;
+
+    for (index, line) in lines.iter().enumerate() {
+        writer
+            .write_all(format!("CODE {} {}\n", index + 1, line.trim_end()).as_bytes())
+            .map_err(|error| format!("Serial write failed: {error}"))?;
+    }
+
+    writer
+        .write_all(b"END_CODE_UPLOAD\n")
+        .map_err(|error| format!("Serial write failed: {error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("Serial flush failed: {error}"))?;
+
+    Ok(lines.len() as u32)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -200,7 +239,8 @@ pub fn run() {
             connect_serial,
             disconnect_serial,
             get_connection_status,
-            send_serial_line
+            send_serial_line,
+            deploy_code_to_device
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

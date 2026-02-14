@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
 const SERIAL_EVENT = "serial_line";
+const OBSERVE_INTERVAL_MS = 1400;
+const AUDIO_SAMPLE_INTERVAL_MS = 180;
+const API_BASE_URL = (import.meta.env.VITE_DAEMON_API_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
 
 function parseManifestPayload(rawPayload) {
   const payload = rawPayload.trim();
@@ -101,6 +104,17 @@ function planCommands(prompt, manifest) {
   return plan;
 }
 
+function safeTrimmedTail(items, size) {
+  return (items || []).slice(-size).map((entry) => String(entry));
+}
+
+function formatConfidence(confidence) {
+  if (typeof confidence !== "number" || Number.isNaN(confidence)) {
+    return "--";
+  }
+  return `${Math.round(confidence * 100)}%`;
+}
+
 function App() {
   const [ports, setPorts] = useState([]);
   const [selectedPort, setSelectedPort] = useState("");
@@ -113,10 +127,251 @@ function App() {
   const [errorText, setErrorText] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const [modelCode, setModelCode] = useState("");
+  const [expectedOutcome, setExpectedOutcome] = useState("");
+  const [testBusy, setTestBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [mediaReady, setMediaReady] = useState(false);
+  const [sessionId, setSessionId] = useState("");
+  const [decision, setDecision] = useState("UNSURE");
+  const [confidence, setConfidence] = useState(null);
+  const [statusMessage, setStatusMessage] = useState("Waiting to start.");
+  const [suggestedCode, setSuggestedCode] = useState("");
+  const [patchSummary, setPatchSummary] = useState("");
+  const [evalHistory, setEvalHistory] = useState([]);
+
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const audioDataRef = useRef(null);
+  const observeTimerRef = useRef(null);
+  const audioTimerRef = useRef(null);
+  const rmsRef = useRef(0);
+  const sessionIdRef = useRef("");
+  const observeInFlightRef = useRef(false);
+
   const catalog = useMemo(() => manifest?.commands || [], [manifest]);
 
   const pushLog = (line) => {
     setWireLog((prev) => [...prev.slice(-199), line]);
+  };
+
+  const pushEvalHistory = (entry) => {
+    setEvalHistory((prev) => [
+      ...prev.slice(-49),
+      {
+        at: new Date().toLocaleTimeString(),
+        decision: entry.decision,
+        confidence: entry.confidence,
+        message: entry.message
+      }
+    ]);
+  };
+
+  const callRealtimeApi = async (payload) => {
+    const response = await fetch(`${API_BASE_URL}/api/realtime/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message = body?.message || `Realtime API request failed (${response.status})`;
+      throw new Error(message);
+    }
+
+    return body;
+  };
+
+  const captureFrame = () => {
+    const videoEl = videoRef.current;
+    const canvasEl = canvasRef.current;
+    if (!videoEl || !canvasEl || videoEl.readyState < 2) {
+      return "";
+    }
+
+    const width = 320;
+    const height = 180;
+    canvasEl.width = width;
+    canvasEl.height = height;
+    const ctx = canvasEl.getContext("2d");
+    if (!ctx) {
+      return "";
+    }
+
+    ctx.drawImage(videoEl, 0, 0, width, height);
+    const encoded = canvasEl.toDataURL("image/jpeg", 0.6);
+    const [, base64 = ""] = encoded.split(",");
+    return base64;
+  };
+
+  const stopMediaCapture = async () => {
+    if (audioTimerRef.current) {
+      window.clearInterval(audioTimerRef.current);
+      audioTimerRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      try {
+        await audioContextRef.current.close();
+      } catch {
+        // Ignore close failure.
+      }
+      audioContextRef.current = null;
+    }
+
+    analyserRef.current = null;
+    audioDataRef.current = null;
+    rmsRef.current = 0;
+
+    if (streamRef.current) {
+      for (const track of streamRef.current.getTracks()) {
+        track.stop();
+      }
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    setMediaReady(false);
+  };
+
+  const startMediaCapture = async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 360, frameRate: { ideal: 24 } },
+      audio: true
+    });
+
+    streamRef.current = stream;
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+    }
+
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      const audioContext = new AudioCtx();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+
+      const data = new Uint8Array(analyser.fftSize);
+      audioContextRef.current = audioContext;
+      analyserRef.current = analyser;
+      audioDataRef.current = data;
+
+      audioTimerRef.current = window.setInterval(() => {
+        if (!analyserRef.current || !audioDataRef.current) {
+          return;
+        }
+
+        analyserRef.current.getByteTimeDomainData(audioDataRef.current);
+        let sum = 0;
+        for (let i = 0; i < audioDataRef.current.length; i += 1) {
+          const centered = (audioDataRef.current[i] - 128) / 128;
+          sum += centered * centered;
+        }
+        const rms = Math.sqrt(sum / audioDataRef.current.length);
+        rmsRef.current = Math.max(0, Math.min(1, rms));
+      }, AUDIO_SAMPLE_INTERVAL_MS);
+    }
+
+    setMediaReady(true);
+  };
+
+  const clearObserveLoop = () => {
+    if (observeTimerRef.current) {
+      window.clearInterval(observeTimerRef.current);
+      observeTimerRef.current = null;
+    }
+  };
+
+  const stopRealtimeCycle = async (reason) => {
+    clearObserveLoop();
+    setTesting(false);
+    observeInFlightRef.current = false;
+
+    const currentSessionId = sessionIdRef.current;
+    sessionIdRef.current = "";
+    setSessionId("");
+
+    if (currentSessionId) {
+      try {
+        await callRealtimeApi({
+          event: "stop",
+          session_id: currentSessionId,
+          expected_outcome: expectedOutcome.trim(),
+          current_code: modelCode.trim(),
+          telemetry_tail: safeTrimmedTail(telemetry, 12)
+        });
+      } catch {
+        // Ignore stop errors.
+      }
+    }
+
+    await stopMediaCapture();
+
+    if (reason) {
+      setChat((prev) => [...prev, { role: "assistant", content: reason }]);
+    }
+  };
+
+  const observeOnce = async () => {
+    if (!sessionIdRef.current || observeInFlightRef.current) {
+      return;
+    }
+
+    observeInFlightRef.current = true;
+    try {
+      const response = await callRealtimeApi({
+        event: "observe",
+        session_id: sessionIdRef.current,
+        expected_outcome: expectedOutcome.trim(),
+        current_code: modelCode.trim(),
+        telemetry_tail: safeTrimmedTail(telemetry, 12),
+        observation: {
+          timestamp_ms: Date.now(),
+          audio_rms: rmsRef.current,
+          video_frame_jpeg_base64: captureFrame()
+        }
+      });
+
+      setDecision(response.decision);
+      setConfidence(response.confidence);
+      setStatusMessage(response.message);
+      pushEvalHistory(response);
+
+      if (response.should_update_code && response.updated_code) {
+        setSuggestedCode(response.updated_code);
+        setPatchSummary(response.patch_summary || "Model suggested a code update.");
+      }
+
+      if (response.decision === "MATCH") {
+        await stopRealtimeCycle("Realtime evaluator confirmed expected behavior.");
+      } else if (response.should_update_code && response.updated_code) {
+        await stopRealtimeCycle("Realtime evaluator proposed a code update. Apply it and run test again.");
+      }
+    } catch (error) {
+      setErrorText(String(error));
+      await stopRealtimeCycle("Realtime loop stopped due to evaluator/API error.");
+    } finally {
+      observeInFlightRef.current = false;
+    }
+  };
+
+  const beginObserveLoop = () => {
+    clearObserveLoop();
+    observeTimerRef.current = window.setInterval(() => {
+      observeOnce();
+    }, OBSERVE_INTERVAL_MS);
+    observeOnce();
   };
 
   const refreshPorts = async () => {
@@ -171,10 +426,13 @@ function App() {
       .catch(() => {});
 
     return () => {
+      clearObserveLoop();
+      stopMediaCapture();
       if (unlisten) {
         unlisten();
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const connect = async () => {
@@ -211,6 +469,7 @@ function App() {
       setManifest(null);
       setTelemetry([]);
       setErrorText("");
+      await stopRealtimeCycle("Device disconnected; stopped realtime loop.");
     } catch (error) {
       setErrorText(String(error));
     } finally {
@@ -235,6 +494,8 @@ function App() {
     }
 
     const planText = plan.map((step) => `RUN ${step.token}${step.args.length ? ` ${step.args.join(" ")}` : ""}`).join(" | ");
+    const codeBlock = `${plan.map((step) => `RUN ${step.token}${step.args.length ? ` ${step.args.join(" ")}` : ""}`).join("\n")}\nSTOP`;
+    setModelCode(codeBlock);
     setChat((prev) => [...prev, { role: "assistant", content: `Plan: ${planText}` }]);
 
     for (const step of plan) {
@@ -249,6 +510,71 @@ function App() {
         setChat((prev) => [...prev, { role: "assistant", content: `Send failed: ${String(error)}` }]);
       }
     }
+  };
+
+  const startRealtimeTest = async () => {
+    if (!connectedPort) {
+      setErrorText("Connect to a device before starting realtime test.");
+      return;
+    }
+
+    if (!modelCode.trim()) {
+      setErrorText("Model output code is required.");
+      return;
+    }
+
+    if (!expectedOutcome.trim()) {
+      setErrorText("Expected outcome is required.");
+      return;
+    }
+
+    setTestBusy(true);
+    setErrorText("");
+    setSuggestedCode("");
+    setPatchSummary("");
+    setEvalHistory([]);
+    setDecision("UNSURE");
+    setConfidence(null);
+    setStatusMessage("Deploying code to device...");
+
+    try {
+      const deployedLines = await invoke("deploy_code_to_device", { code: modelCode });
+      setChat((prev) => [
+        ...prev,
+        { role: "assistant", content: `Uploaded ${deployedLines} code lines to ${connectedPort}. Starting webcam/mic validation.` }
+      ]);
+
+      await startMediaCapture();
+
+      const startResponse = await callRealtimeApi({
+        event: "start",
+        expected_outcome: expectedOutcome.trim(),
+        current_code: modelCode.trim(),
+        telemetry_tail: safeTrimmedTail(telemetry, 12)
+      });
+
+      sessionIdRef.current = startResponse.session_id;
+      setSessionId(startResponse.session_id);
+      setDecision(startResponse.decision);
+      setConfidence(startResponse.confidence);
+      setStatusMessage(startResponse.message);
+      pushEvalHistory(startResponse);
+      setTesting(true);
+      beginObserveLoop();
+    } catch (error) {
+      setErrorText(String(error));
+      await stopRealtimeCycle("Failed to start realtime cycle.");
+    } finally {
+      setTestBusy(false);
+    }
+  };
+
+  const applySuggestedCode = () => {
+    if (!suggestedCode) {
+      return;
+    }
+    setModelCode(suggestedCode);
+    setChat((prev) => [...prev, { role: "assistant", content: "Applied suggested code update. Run Test on Device again." }]);
   };
 
   return (
@@ -272,6 +598,7 @@ function App() {
 
       <div className="status-row">
         <span>{connectedPort ? `Connected: ${connectedPort}` : "Disconnected"}</span>
+        <span>Realtime API: {API_BASE_URL}</span>
         {errorText && <span className="error">{errorText}</span>}
       </div>
 
@@ -299,6 +626,55 @@ function App() {
             />
             <button onClick={sendInstruction} disabled={!connectedPort}>Send</button>
             <button onClick={() => invoke("send_serial_line", { line: "STOP" })} disabled={!connectedPort}>STOP</button>
+          </div>
+        </section>
+
+        <section className="panel test-panel">
+          <h2>Realtime Test on Device</h2>
+          <label className="field">
+            <span>Model output code</span>
+            <textarea
+              rows={8}
+              value={modelCode}
+              onChange={(event) => setModelCode(event.target.value)}
+              placeholder="Paste generated code or command script here."
+            />
+          </label>
+          <label className="field">
+            <span>Expected outcome</span>
+            <input
+              value={expectedOutcome}
+              onChange={(event) => setExpectedOutcome(event.target.value)}
+              placeholder="Example: Robot moves forward 30cm then stops."
+            />
+          </label>
+          <div className="test-controls">
+            <button onClick={startRealtimeTest} disabled={testBusy || testing || !connectedPort}>Test on Device</button>
+            <button onClick={() => stopRealtimeCycle("Realtime cycle stopped by user.")} disabled={!testing}>Stop Test</button>
+            <button onClick={applySuggestedCode} disabled={!suggestedCode}>Apply Code Update</button>
+          </div>
+
+          <div className="decision-card">
+            <div><strong>Session:</strong> {sessionId || "not started"}</div>
+            <div><strong>State:</strong> {testing ? "Monitoring" : "Idle"} ({mediaReady ? "webcam/mic on" : "media off"})</div>
+            <div><strong>Decision:</strong> {decision}</div>
+            <div><strong>Confidence:</strong> {formatConfidence(confidence)}</div>
+            <div><strong>Model message:</strong> {statusMessage}</div>
+            {patchSummary && <div><strong>Patch summary:</strong> {patchSummary}</div>}
+          </div>
+
+          <div className="video-wrap">
+            <video ref={videoRef} autoPlay muted playsInline />
+            <canvas ref={canvasRef} className="hidden-canvas" />
+          </div>
+
+          <div className="eval-log">
+            {evalHistory.map((entry, idx) => (
+              <div key={`${entry.at}-${idx}`}>
+                {entry.at} | {entry.decision} ({formatConfidence(entry.confidence)}): {entry.message}
+              </div>
+            ))}
+            {!evalHistory.length && <div className="empty">No evaluation events yet.</div>}
           </div>
         </section>
 
