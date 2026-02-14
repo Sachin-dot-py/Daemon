@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import "./App.css";
 
 const DEFAULT_VERCEL_BASE_URL = "https://daemon-ten-chi.vercel.app";
@@ -6,10 +7,12 @@ const DEFAULT_ORCH_BASE_URL = "http://127.0.0.1:5055";
 const FRAME_WIDTH = 320;
 const FRAME_HEIGHT = 240;
 const CAPTURE_INTERVAL_MS = 300;
+const STATUS_POLL_MS = 2000;
 const INSTRUCTION = "pick the blue cube";
 
 const VERCEL_BASE_URL = import.meta.env.VITE_VERCEL_BASE_URL || DEFAULT_VERCEL_BASE_URL;
 const ORCH_BASE_URL = import.meta.env.VITE_ORCHESTRATOR_BASE_URL || DEFAULT_ORCH_BASE_URL;
+const RUNTIME_IS_TAURI = isTauri();
 
 const INITIAL_STATE = {
   stage: "SEARCH",
@@ -23,6 +26,10 @@ const INITIAL_STATE = {
     arm_grip_token: "GRIP"
   }
 };
+
+function nowStamp() {
+  return new Date().toLocaleTimeString();
+}
 
 async function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
@@ -38,10 +45,7 @@ async function blobToBase64(blob) {
 }
 
 async function captureFrameBase64(video, canvas) {
-  if (!video || !canvas) {
-    return null;
-  }
-  if (video.readyState < 2) {
+  if (!video || !canvas || video.readyState < 2) {
     return null;
   }
 
@@ -60,7 +64,7 @@ async function captureFrameBase64(video, canvas) {
   return blobToBase64(blob);
 }
 
-async function postJson(url, body) {
+async function postVisionJson(url, body) {
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -77,6 +81,7 @@ function drawOverlay(canvas, perception) {
   if (!canvas) {
     return;
   }
+
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     return;
@@ -107,34 +112,197 @@ function drawOverlay(canvas, perception) {
   ctx.fillText(label, x * sx + 7, Math.max(14, y * sy - 8));
 }
 
+async function orchestratorStatus(orchestratorBaseUrl) {
+  if (RUNTIME_IS_TAURI) {
+    try {
+      return await invoke("orchestrator_status", { orchestratorBaseUrl });
+    } catch (error) {
+      throw new Error(
+        `Tauri proxy GET ${orchestratorBaseUrl}/status failed: ${String(error)}. ` +
+        "If you are viewing localhost:1420 in a browser tab, use the Tauri app window instead."
+      );
+    }
+  }
+  const resp = await fetch(`${orchestratorBaseUrl}/status`);
+  if (!resp.ok) {
+    throw new Error(`GET ${orchestratorBaseUrl}/status failed: HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+async function orchestratorExecutePlan(orchestratorBaseUrl, plan) {
+  if (RUNTIME_IS_TAURI) {
+    try {
+      return await invoke("orchestrator_execute_plan", { orchestratorBaseUrl, plan });
+    } catch (error) {
+      throw new Error(
+        `Tauri proxy POST ${orchestratorBaseUrl}/execute_plan failed: ${String(error)}. ` +
+        "If you are viewing localhost:1420 in a browser tab, use the Tauri app window instead."
+      );
+    }
+  }
+  const resp = await fetch(`${orchestratorBaseUrl}/execute_plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plan })
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(data?.error || `POST ${orchestratorBaseUrl}/execute_plan failed: HTTP ${resp.status}`);
+  }
+  return data;
+}
+
+async function orchestratorStop(orchestratorBaseUrl) {
+  if (RUNTIME_IS_TAURI) {
+    try {
+      return await invoke("orchestrator_stop", { orchestratorBaseUrl });
+    } catch (error) {
+      throw new Error(
+        `Tauri proxy POST ${orchestratorBaseUrl}/stop failed: ${String(error)}. ` +
+        "If you are viewing localhost:1420 in a browser tab, use the Tauri app window instead."
+      );
+    }
+  }
+  const resp = await fetch(`${orchestratorBaseUrl}/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({})
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(data?.error || `POST ${orchestratorBaseUrl}/stop failed: HTTP ${resp.status}`);
+  }
+  return data;
+}
+
 function App() {
   const videoRef = useRef(null);
   const captureCanvasRef = useRef(null);
   const overlayCanvasRef = useRef(null);
   const streamRef = useRef(null);
-  const timerRef = useRef(null);
+  const liveTimerRef = useRef(null);
   const inFlightRef = useRef(false);
   const stateRef = useRef(INITIAL_STATE);
 
   const [liveEnabled, setLiveEnabled] = useState(false);
   const [sendingFrames, setSendingFrames] = useState(false);
-  const [bridgeConnected, setBridgeConnected] = useState(false);
   const [fsmState, setFsmState] = useState(INITIAL_STATE);
   const [perception, setPerception] = useState(null);
   const [lastPlan, setLastPlan] = useState([]);
   const [lastDebug, setLastDebug] = useState(null);
+
+  const [dryRun, setDryRun] = useState(false);
+  const [orchestratorReachable, setOrchestratorReachable] = useState(false);
+  const [lastOrchestratorError, setLastOrchestratorError] = useState("");
+  const [lastActionText, setLastActionText] = useState("");
+  const [lastActionTimestamp, setLastActionTimestamp] = useState("");
   const [errorText, setErrorText] = useState("");
 
   const statusText = useMemo(() => {
     if (!liveEnabled) {
-      return bridgeConnected ? "idle / connected" : "idle / disconnected";
+      return sendingFrames ? "single-step in progress" : "idle";
     }
-    return sendingFrames ? "connected / sending frames" : "connected / waiting";
-  }, [bridgeConnected, liveEnabled, sendingFrames]);
+    return sendingFrames ? "live / sending frames" : "live / waiting";
+  }, [liveEnabled, sendingFrames]);
 
   useEffect(() => {
     drawOverlay(overlayCanvasRef.current, perception);
   }, [perception]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        await orchestratorStatus(ORCH_BASE_URL);
+        if (cancelled) {
+          return;
+        }
+        setOrchestratorReachable(true);
+        setLastOrchestratorError("");
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setOrchestratorReachable(false);
+        setLastOrchestratorError(String(error));
+      }
+    };
+
+    poll();
+    const interval = setInterval(poll, STATUS_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const clearLiveTimer = () => {
+    if (liveTimerRef.current) {
+      clearInterval(liveTimerRef.current);
+      liveTimerRef.current = null;
+    }
+  };
+
+  const releaseCamera = () => {
+    if (streamRef.current) {
+      for (const track of streamRef.current.getTracks()) {
+        track.stop();
+      }
+      streamRef.current = null;
+    }
+  };
+
+  const ensureCamera = async () => {
+    if (streamRef.current && videoRef.current?.srcObject) {
+      return;
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480 },
+      audio: false
+    });
+
+    streamRef.current = stream;
+    const video = videoRef.current;
+    if (!video) {
+      throw new Error("video element unavailable");
+    }
+
+    video.srcObject = stream;
+    await video.play();
+
+    if (overlayCanvasRef.current) {
+      overlayCanvasRef.current.width = 640;
+      overlayCanvasRef.current.height = 480;
+    }
+  };
+
+  const stopLoop = async ({ sendStop }) => {
+    clearLiveTimer();
+    inFlightRef.current = false;
+    setSendingFrames(false);
+    setLiveEnabled(false);
+    releaseCamera();
+
+    if (sendStop) {
+      try {
+        await orchestratorStop(ORCH_BASE_URL);
+        setOrchestratorReachable(true);
+        setLastOrchestratorError("");
+        setLastActionText("STOP OK");
+        setLastActionTimestamp(nowStamp());
+      } catch (error) {
+        const msg = String(error);
+        setOrchestratorReachable(false);
+        setLastOrchestratorError(msg);
+        setLastActionText("STOP FAILED");
+        setLastActionTimestamp(nowStamp());
+        setErrorText(`STOP failed: ${msg}`);
+      }
+    }
+  };
 
   useEffect(() => {
     return () => {
@@ -142,35 +310,8 @@ function App() {
     };
   }, []);
 
-  const stopLoop = async ({ sendStop }) => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-    inFlightRef.current = false;
-    setSendingFrames(false);
-    setLiveEnabled(false);
-
-    if (streamRef.current) {
-      for (const track of streamRef.current.getTracks()) {
-        track.stop();
-      }
-      streamRef.current = null;
-    }
-
-    if (sendStop) {
-      try {
-        await postJson(`${ORCH_BASE_URL}/stop`, {});
-        setBridgeConnected(true);
-      } catch (error) {
-        setBridgeConnected(false);
-        setErrorText(`STOP failed: ${String(error)}`);
-      }
-    }
-  };
-
-  const executeTick = async () => {
-    if (inFlightRef.current || !liveEnabled) {
+  const executeSingleVisionStep = async ({ executePlan }) => {
+    if (inFlightRef.current) {
       return;
     }
 
@@ -178,9 +319,10 @@ function App() {
     setSendingFrames(true);
 
     try {
+      await ensureCamera();
       const frame_jpeg_base64 = await captureFrameBase64(videoRef.current, captureCanvasRef.current);
       if (!frame_jpeg_base64) {
-        return;
+        throw new Error("camera frame unavailable");
       }
 
       const visionPayload = {
@@ -191,8 +333,8 @@ function App() {
         telemetry_snapshot: null
       };
 
-      const visionResponse = await postJson(`${VERCEL_BASE_URL}/api/vision_step`, visionPayload);
-      const nextState = visionResponse?.state || fsmState;
+      const visionResponse = await postVisionJson(`${VERCEL_BASE_URL}/api/vision_step`, visionPayload);
+      const nextState = visionResponse?.state || stateRef.current;
       const nextPlan = Array.isArray(visionResponse?.plan) ? visionResponse.plan : [];
 
       stateRef.current = nextState;
@@ -202,19 +344,33 @@ function App() {
       setLastDebug(visionResponse?.debug || null);
       setErrorText("");
 
-      const executeResponse = await postJson(`${ORCH_BASE_URL}/execute_plan`, { plan: nextPlan });
-      if (!executeResponse?.ok) {
-        throw new Error(executeResponse?.error || "execute_plan returned non-ok response");
+      if (executePlan) {
+        const response = await orchestratorExecutePlan(ORCH_BASE_URL, nextPlan);
+        const ok = Boolean(response?.ok);
+        if (!ok) {
+          throw new Error(response?.error || "execute_plan returned non-ok response");
+        }
+        setOrchestratorReachable(true);
+        setLastOrchestratorError("");
+        setLastActionText("EXECUTE_PLAN OK");
+      } else {
+        setLastActionText("DRY RUN: plan not executed");
       }
-      setBridgeConnected(true);
+      setLastActionTimestamp(nowStamp());
 
-      if (String(nextState?.stage || "").toUpperCase() === "DONE") {
+      if (String(nextState?.stage || "").toUpperCase() === "DONE" && liveEnabled) {
         await stopLoop({ sendStop: false });
       }
     } catch (error) {
-      setErrorText(String(error));
-      setBridgeConnected(false);
-      await stopLoop({ sendStop: true });
+      const msg = String(error);
+      setErrorText(msg);
+      setOrchestratorReachable(false);
+      setLastOrchestratorError(msg);
+      setLastActionText("STEP FAILED");
+      setLastActionTimestamp(nowStamp());
+      if (liveEnabled) {
+        await stopLoop({ sendStop: true });
+      }
     } finally {
       inFlightRef.current = false;
       setSendingFrames(false);
@@ -223,25 +379,7 @@ function App() {
 
   const startLiveCamera = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480 },
-        audio: false
-      });
-
-      streamRef.current = stream;
-      const video = videoRef.current;
-      if (!video) {
-        throw new Error("video element is unavailable");
-      }
-
-      video.srcObject = stream;
-      await video.play();
-
-      if (overlayCanvasRef.current) {
-        overlayCanvasRef.current.width = 640;
-        overlayCanvasRef.current.height = 480;
-      }
-
+      await ensureCamera();
       setFsmState(INITIAL_STATE);
       stateRef.current = INITIAL_STATE;
       setPerception(null);
@@ -250,8 +388,8 @@ function App() {
       setErrorText("");
       setLiveEnabled(true);
 
-      timerRef.current = setInterval(() => {
-        executeTick();
+      liveTimerRef.current = setInterval(() => {
+        executeSingleVisionStep({ executePlan: !dryRun });
       }, CAPTURE_INTERVAL_MS);
     } catch (error) {
       setErrorText(`Camera start failed: ${String(error)}`);
@@ -271,6 +409,10 @@ function App() {
     await stopLoop({ sendStop: true });
   };
 
+  const handleSingleStep = async () => {
+    await executeSingleVisionStep({ executePlan: !dryRun });
+  };
+
   return (
     <div className="live-app">
       <header className="header">
@@ -279,18 +421,35 @@ function App() {
           <button onClick={handleLiveToggle} className={liveEnabled ? "btn-live active" : "btn-live"}>
             {liveEnabled ? "Disable Live Camera" : "Enable Live Camera"}
           </button>
-          <button onClick={handleStop} className="btn-stop">
-            STOP
-          </button>
+          <button onClick={handleSingleStep} className="btn-step">SINGLE STEP</button>
+          <button onClick={handleStop} className="btn-stop">STOP</button>
         </div>
       </header>
 
       <section className="status-bar">
         <span><strong>Status:</strong> {statusText}</span>
+        <span><strong>Runtime:</strong> {RUNTIME_IS_TAURI ? "Tauri" : "Browser (fallback mode)"}</span>
         <span><strong>FSM:</strong> {String(fsmState?.stage || "SEARCH")}</span>
         <span><strong>Vision API:</strong> {VERCEL_BASE_URL}</span>
         <span><strong>Orchestrator:</strong> {ORCH_BASE_URL}</span>
+        <span><strong>Orchestrator reachable:</strong> {String(orchestratorReachable)}</span>
+        <span><strong>Last action:</strong> {lastActionText || "-"}</span>
+        <span><strong>Last action at:</strong> {lastActionTimestamp || "-"}</span>
+        <span><strong>DRY RUN:</strong> {String(dryRun)}</span>
       </section>
+
+      <section className="toggle-row">
+        <label>
+          <input type="checkbox" checked={dryRun} onChange={(event) => setDryRun(event.target.checked)} />
+          DRY RUN (do not call execute_plan)
+        </label>
+      </section>
+
+      {lastOrchestratorError ? (
+        <section className="error-box">
+          <strong>Last orchestrator error:</strong> {lastOrchestratorError}
+        </section>
+      ) : null}
 
       {errorText ? <section className="error-box">{errorText}</section> : null}
 
