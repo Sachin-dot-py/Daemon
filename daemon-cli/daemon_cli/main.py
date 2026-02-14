@@ -19,6 +19,10 @@ DEFAULT_PROFILES_DIR = "profiles"
 DEFAULT_PUBLISH_URL = "https://daemon-api.vercel.app/api/v1/daemon-configs/ingest"
 DEFAULT_PUBLISH_TIMEOUT_SECONDS = 20
 MAX_CONTEXT_FILE_BYTES = 300_000
+AUTO_FIRMWARE_DIR_HELP = (
+    "auto-detect: ./firmware-code, ./daemon-cli/firmware-code, "
+    "<daemon-cli>/firmware-code"
+)
 
 
 def resolve_default_firmware_dir() -> Path:
@@ -35,7 +39,10 @@ def resolve_default_firmware_dir() -> Path:
     return (cli_root / "firmware-code").resolve()
 
 
-DEFAULT_FIRMWARE_DIR = str(resolve_default_firmware_dir())
+def resolve_firmware_dir(firmware_dir_arg: str | None) -> Path:
+    if firmware_dir_arg:
+        return Path(firmware_dir_arg).resolve()
+    return resolve_default_firmware_dir()
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are an embedded firmware generation assistant for Daemon. "
@@ -296,8 +303,8 @@ def add_build_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     build_parser.add_argument(
         "--firmware-dir",
-        default=DEFAULT_FIRMWARE_DIR,
-        help=f"Firmware root (default: {DEFAULT_FIRMWARE_DIR})",
+        default=None,
+        help=f"Firmware root (default: {AUTO_FIRMWARE_DIR_HELP})",
     )
     build_parser.add_argument(
         "--context-dir",
@@ -369,8 +376,8 @@ def add_publish_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     publish_parser.add_argument(
         "--firmware-dir",
-        default=DEFAULT_FIRMWARE_DIR,
-        help=f"Firmware root (default: {DEFAULT_FIRMWARE_DIR})",
+        default=None,
+        help=f"Firmware root (default: {AUTO_FIRMWARE_DIR_HELP})",
     )
     publish_parser.add_argument(
         "--config-id",
@@ -399,12 +406,12 @@ def add_publish_parser(subparsers: argparse._SubParsersAction) -> None:
 def add_init_samples_parser(subparsers: argparse._SubParsersAction) -> None:
     init_parser = subparsers.add_parser(
         "init-samples",
-        help="Create strong sample firmware profile contexts under firmware/profiles",
+        help="Create sample firmware profile contexts under <firmware-dir>/profiles",
     )
     init_parser.add_argument(
         "--firmware-dir",
-        default=DEFAULT_FIRMWARE_DIR,
-        help=f"Firmware root (default: {DEFAULT_FIRMWARE_DIR})",
+        default=None,
+        help=f"Firmware root (default: {AUTO_FIRMWARE_DIR_HELP})",
     )
     init_parser.add_argument(
         "--force",
@@ -415,7 +422,7 @@ def add_init_samples_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def handle_build(args: argparse.Namespace) -> None:
-    firmware_dir = Path(args.firmware_dir).resolve()
+    firmware_dir = resolve_firmware_dir(args.firmware_dir)
     firmware_dir.mkdir(parents=True, exist_ok=True)
 
     context_dir = resolve_context_dir(firmware_dir, args.context_dir)
@@ -450,6 +457,7 @@ def handle_build(args: argparse.Namespace) -> None:
         )
     else:
         payload = generate_from_template(config_id=config_id, profile=args.profile)
+    validate_generated_artifacts(payload)
 
     daemon_yaml_path.write_text(payload["daemon_yaml"], encoding="utf-8")
     daemon_entry_path.write_text(payload["daemon_entry_c"], encoding="utf-8")
@@ -507,7 +515,7 @@ def handle_build(args: argparse.Namespace) -> None:
 
 
 def handle_publish(args: argparse.Namespace) -> None:
-    firmware_dir = Path(args.firmware_dir).resolve()
+    firmware_dir = resolve_firmware_dir(args.firmware_dir)
     config_dir = resolve_config_dir(
         firmware_dir=firmware_dir,
         explicit_config_dir=args.config_dir,
@@ -550,7 +558,7 @@ def handle_publish(args: argparse.Namespace) -> None:
 
 
 def handle_init_samples(args: argparse.Namespace) -> None:
-    firmware_dir = Path(args.firmware_dir).resolve()
+    firmware_dir = resolve_firmware_dir(args.firmware_dir)
     profiles_dir = firmware_dir / DEFAULT_PROFILES_DIR
     profiles_dir.mkdir(parents=True, exist_ok=True)
 
@@ -731,6 +739,30 @@ def generate_from_template(config_id: str, profile: str) -> dict[str, str]:
     return {"daemon_yaml": daemon_yaml, "daemon_entry_c": daemon_entry_c}
 
 
+def validate_generated_artifacts(payload: dict[str, str]) -> None:
+    daemon_yaml = payload.get("daemon_yaml", "")
+    daemon_entry_c = payload.get("daemon_entry_c", "")
+    if not daemon_yaml.strip() or not daemon_entry_c.strip():
+        fail("Generation returned empty artifacts.")
+
+    required_yaml_markers = (
+        "command_direction_mapping:",
+        "telemetry:",
+        "safety:",
+    )
+    missing_yaml = [marker for marker in required_yaml_markers if marker not in daemon_yaml]
+    if missing_yaml:
+        fail(f"Generated DAEMON.yaml missing required sections: {', '.join(missing_yaml)}")
+
+    required_c_markers = (
+        "daemon_dispatch_command(",
+        "return -1;",
+    )
+    missing_c = [marker for marker in required_c_markers if marker not in daemon_entry_c]
+    if missing_c:
+        fail(f"Generated daemon_entry.c missing required dispatcher markers: {', '.join(missing_c)}")
+
+
 def rc_car_templates(config_id: str, profile: str, created_at: str) -> tuple[str, str]:
     daemon_yaml = f"""schema_version: "1.0"
 daemon:
@@ -876,6 +908,7 @@ telemetry:
 """
 
     daemon_entry_c = """#include <stdbool.h>
+#include <string.h>
 #include <stdint.h>
 
 static float g_target_humidity_pct = 55.0f;
@@ -902,6 +935,18 @@ bool daemon_should_run_pump(float measured_humidity_pct, uint32_t now_s) {
         return true;
     }
     return measured_humidity_pct < (g_target_humidity_pct - 4.0f);
+}
+
+int daemon_dispatch_command(const char *cmd, float value_a, uint32_t value_b, uint32_t now_s) {
+    if (strcmp(cmd, "climate.set_target_humidity") == 0) {
+        daemon_set_target_humidity(value_a);
+        return 0;
+    }
+    if (strcmp(cmd, "irrigation.manual_override") == 0) {
+        daemon_set_irrigation_override(value_a > 0.5f, value_b, now_s);
+        return 0;
+    }
+    return -1;
 }
 """
     return daemon_yaml, daemon_entry_c
@@ -934,10 +979,15 @@ command_direction_mapping:
       joint_id: int
       angle_deg: float
       duration_s: float
+telemetry:
+  events:
+    - id: telemetry.arm_state
+      fields: [joint_id, angle_deg, in_motion, error_code]
 """
 
     daemon_entry_c = """#include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 typedef struct {
     float min_deg;
@@ -964,6 +1014,23 @@ int daemon_arm_move_joint(size_t joint_id, float angle_deg, float duration_s) {
     // TODO: enqueue segment and stream progress telemetry.
     return 0;
 }
+
+int daemon_arm_home(void) {
+    // TODO: run deterministic homing sequence with limit-switch checks.
+    return 0;
+}
+
+int daemon_arm_stop(void) {
+    // TODO: clear queued segments and disable motor outputs safely.
+    return 0;
+}
+
+int daemon_dispatch_command(const char *cmd, size_t joint_id, float angle_deg, float duration_s) {
+    if (strcmp(cmd, "arm.home") == 0) return daemon_arm_home();
+    if (strcmp(cmd, "arm.stop") == 0) return daemon_arm_stop();
+    if (strcmp(cmd, "arm.move_joint") == 0) return daemon_arm_move_joint(joint_id, angle_deg, duration_s);
+    return -1;
+}
 """
     return daemon_yaml, daemon_entry_c
 
@@ -974,6 +1041,8 @@ daemon:
   config_id: "{config_id}"
   profile: "{profile}"
   created_at: "{created_at}"
+  safety:
+    max_command_rate_hz: 20
 transport:
   command_ingress:
     type: serial_json
@@ -1004,6 +1073,18 @@ void daemon_set_mode(const char *mode) {
 
 void daemon_stop(void) {
     daemon_set_mode("idle");
+}
+
+int daemon_dispatch_command(const char *cmd, const char *mode) {
+    if (strcmp(cmd, "device.set_mode") == 0) {
+        daemon_set_mode(mode);
+        return 0;
+    }
+    if (strcmp(cmd, "device.stop") == 0) {
+        daemon_stop();
+        return 0;
+    }
+    return -1;
 }
 """
     return daemon_yaml, daemon_entry_c

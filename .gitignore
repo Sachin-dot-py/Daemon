@@ -58,3 +58,7 @@ desktop-app/src-tauri/target/
 # Temporary files
 *.tmp
 *.temp
+
+# Node / frontend (web)
+web/node_modules/
+web/.next/

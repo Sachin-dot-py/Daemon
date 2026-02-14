@@ -5,6 +5,7 @@ Root-level setup scripts for installing Rust + Tauri CLI are included for both m
 ## Project layout
 
 - `desktop-app/`: Tauri + React desktop app
+- `web/`: Vercel Next.js app (ingest API + deployment dashboard)
 - `daemon-cli/`: Firmware generation CLI (`daemon build`, `daemon publish`, `daemon init-samples`)
 - `setup-macos.sh`: macOS installer/bootstrap script
 - `setup-windows.ps1`: Windows installer/bootstrap script
