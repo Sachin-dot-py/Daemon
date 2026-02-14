@@ -96,14 +96,37 @@ def handle_run(state: ClientState, manifest: dict, token: str, args: list[str]) 
     for idx, arg_spec in enumerate(expected_args):
         raw = args[idx]
         arg_type = str(arg_spec.get("type", "")).lower()
-        if arg_type in {"int", "float"}:
+        if arg_type == "int":
+            try:
+                value = int(raw)
+            except ValueError:
+                return "ERR BAD_ARGS parse"
+        elif arg_type == "float":
             try:
                 value = float(raw)
             except ValueError:
                 return "ERR BAD_ARGS parse"
+        elif arg_type == "bool":
+            lowered = raw.strip().lower()
+            if lowered not in {"1", "0", "true", "false"}:
+                return "ERR BAD_ARGS parse"
+            value = lowered in {"1", "true"}
+        elif arg_type == "string":
+            value = raw
+        else:
+            return "ERR BAD_ARGS unsupported_type"
 
-            min_v = arg_spec.get("min")
-            max_v = arg_spec.get("max")
+        allowed = arg_spec.get("enum")
+        if isinstance(allowed, list) and allowed:
+            if value not in allowed and str(value) not in [str(item) for item in allowed]:
+                if command["safety"].get("clamp", True):
+                    value = allowed[0]
+                else:
+                    return "ERR RANGE enum"
+
+        min_v = arg_spec.get("min")
+        max_v = arg_spec.get("max")
+        if isinstance(value, (int, float)):
             if min_v is not None and value < float(min_v):
                 if command["safety"].get("clamp", True):
                     value = float(min_v)

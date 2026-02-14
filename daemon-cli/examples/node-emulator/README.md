@@ -7,6 +7,11 @@ python emulator.py
 # python emulator.py --host 127.0.0.1 --port 7777 --manifest /path/to/DAEMON.yml
 ```
 
+If using YAML manifests, install:
+```bash
+python -m pip install PyYAML
+```
+
 Then connect via netcat:
 ```bash
 nc 127.0.0.1 7777
