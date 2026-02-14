@@ -443,6 +443,20 @@ function App() {
       return;
     }
 
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+      const origin = typeof window !== "undefined" ? window.location?.origin : "unknown";
+      const secure = typeof window !== "undefined" ? Boolean(window.isSecureContext) : false;
+      throw new Error(
+        [
+          "Camera API unavailable (navigator.mediaDevices.getUserMedia missing).",
+          `origin=${origin}`,
+          `secureContext=${secure}`,
+          "If you're running the Tauri desktop app on macOS, you likely need to rebuild after adding NSCameraUsageDescription (see src-tauri/infoplist/InfoPlist.strings).",
+          "If you're running in a browser, use https or localhost and avoid file://."
+        ].join(" ")
+      );
+    }
+
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: 640, height: 480 },
       audio: false
