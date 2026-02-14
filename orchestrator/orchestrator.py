@@ -134,25 +134,156 @@ class Orchestrator:
                 self.catalog_unqualified[token] = owner
 
     def merged_manifest(self) -> dict[str, Any]:
-        by_node: dict[str, Any] = {}
+        nodes: list[dict[str, Any]] = []
         for node in self.nodes:
-            by_node[node.alias] = {
-                "device": node.manifest.get("device", {}),
-                "commands": node.manifest.get("commands", []),
-                "telemetry": node.manifest.get("telemetry", {}),
-            }
+            nodes.append(
+                {
+                    "name": node.node_name or node.alias,
+                    "node_id": node.node_id or node.alias,
+                    "commands": node.manifest.get("commands", []),
+                    "telemetry": dict(node.telemetry_snapshot),
+                }
+            )
 
         return {
             "daemon_version": "0.1",
-            "nodes": by_node,
-            "catalog": {
-                "qualified": sorted(self.catalog_qualified.keys()),
-                "unqualified": sorted(self.catalog_unqualified.keys()),
-            },
+            "nodes": nodes,
         }
 
     def telemetry_snapshot(self) -> dict[str, Any]:
-        return {node.alias: dict(node.telemetry_snapshot) for node in self.nodes}
+        snapshot: dict[str, Any] = {}
+        for node in self.nodes:
+            key = node.node_name or node.alias
+            snapshot[key] = dict(node.telemetry_snapshot)
+        return snapshot
+
+    def _node_from_target(self, target: str) -> NodeInfo | None:
+        for node in self.nodes:
+            if target in {node.alias, node.node_name, node.node_id}:
+                return node
+        return None
+
+    def _command_spec(self, node: NodeInfo, token: str) -> dict[str, Any] | None:
+        token_u = token.upper()
+        for command in node.manifest.get("commands", []):
+            if str(command.get("token", "")).upper() == token_u:
+                return command
+        return None
+
+    def _validate_arg_value(self, arg_value: Any, arg_spec: dict[str, Any], context: str) -> None:
+        arg_type = str(arg_spec.get("type", "")).lower()
+
+        def is_int_like(value: Any) -> bool:
+            if isinstance(value, bool):
+                return False
+            if isinstance(value, int):
+                return True
+            if isinstance(value, float):
+                return value.is_integer()
+            if isinstance(value, str):
+                try:
+                    int(value)
+                    return True
+                except ValueError:
+                    return False
+            return False
+
+        if arg_type == "int":
+            if not is_int_like(arg_value):
+                raise RuntimeError(f"{context}: expected int")
+            numeric_value = float(int(arg_value))
+        elif arg_type == "float":
+            if isinstance(arg_value, bool):
+                raise RuntimeError(f"{context}: expected float")
+            try:
+                numeric_value = float(arg_value)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"{context}: expected float") from exc
+        elif arg_type == "bool":
+            if isinstance(arg_value, bool):
+                numeric_value = None
+            elif isinstance(arg_value, str) and arg_value.lower() in {"true", "false", "1", "0"}:
+                numeric_value = None
+            else:
+                raise RuntimeError(f"{context}: expected bool")
+        elif arg_type == "string":
+            if not isinstance(arg_value, str):
+                raise RuntimeError(f"{context}: expected string")
+            numeric_value = None
+        else:
+            raise RuntimeError(f"{context}: unsupported arg type '{arg_type}'")
+
+        allowed = arg_spec.get("enum")
+        if isinstance(allowed, list) and allowed:
+            if arg_value not in allowed and str(arg_value) not in [str(item) for item in allowed]:
+                raise RuntimeError(f"{context}: value '{arg_value}' not in enum {allowed}")
+
+        if numeric_value is not None:
+            min_value = arg_spec.get("min")
+            max_value = arg_spec.get("max")
+            if min_value is not None and numeric_value < float(min_value):
+                raise RuntimeError(f"{context}: value {numeric_value} < min {min_value}")
+            if max_value is not None and numeric_value > float(max_value):
+                raise RuntimeError(f"{context}: value {numeric_value} > max {max_value}")
+
+    def validate_plan(self, plan: list[dict[str, Any]]) -> None:
+        if not isinstance(plan, list):
+            raise RuntimeError("plan must be a list")
+
+        for index, step in enumerate(plan):
+            if not isinstance(step, dict):
+                raise RuntimeError(f"step[{index}] must be an object")
+
+            step_type = str(step.get("type", "")).upper()
+            if step_type not in {"RUN", "STOP"}:
+                raise RuntimeError(f"step[{index}] has invalid type '{step.get('type')}'")
+
+            if step_type == "STOP":
+                continue
+
+            target = step.get("target")
+            if not isinstance(target, str) or not target.strip():
+                raise RuntimeError(f"step[{index}] RUN requires non-empty string target")
+
+            node = self._node_from_target(target)
+            if node is None:
+                raise RuntimeError(f"step[{index}] target '{target}' does not match any connected node")
+
+            token = step.get("token")
+            if not isinstance(token, str) or not token.strip():
+                raise RuntimeError(f"step[{index}] RUN requires non-empty string token")
+
+            command_spec = self._command_spec(node, token)
+            if command_spec is None:
+                raise RuntimeError(f"step[{index}] token '{token}' not found on node '{target}'")
+
+            args = step.get("args", [])
+            if not isinstance(args, list):
+                raise RuntimeError(f"step[{index}] args must be a list")
+
+            spec_args = command_spec.get("args", [])
+            if len(args) != len(spec_args):
+                raise RuntimeError(
+                    f"step[{index}] token '{token}' expects {len(spec_args)} args, got {len(args)}"
+                )
+
+            for arg_index, arg_spec in enumerate(spec_args):
+                self._validate_arg_value(
+                    args[arg_index],
+                    arg_spec,
+                    context=f"step[{index}] {token} arg[{arg_index}]",
+                )
+
+            if "duration_ms" in step:
+                duration_ms = step["duration_ms"]
+                if isinstance(duration_ms, bool):
+                    raise RuntimeError(f"step[{index}] duration_ms must be numeric")
+                try:
+                    duration = float(duration_ms)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(f"step[{index}] duration_ms must be numeric") from exc
+                if duration < 0:
+                    raise RuntimeError(f"step[{index}] duration_ms must be >= 0")
 
     def resolve_node(self, target: str | None, token: str) -> NodeInfo:
         token_u = token.upper()
@@ -299,16 +430,24 @@ def make_plan(
 ) -> dict[str, Any]:
     if planner_url:
         try:
-            return call_remote_planner(
+            remote = call_remote_planner(
                 planner_url,
                 instruction,
                 orchestrator.merged_manifest(),
                 orchestrator.telemetry_snapshot(),
             )
+            remote_plan = remote.get("plan")
+            if not isinstance(remote_plan, list):
+                raise RuntimeError("Planner response missing valid plan[]")
+            orchestrator.validate_plan(remote_plan)
+            return remote
         except (RuntimeError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             print(f"planner fallback: {exc}")
 
-    return fallback_plan(instruction)
+    local = fallback_plan(instruction)
+    local_plan = local.get("plan", [])
+    orchestrator.validate_plan(local_plan)
+    return local
 
 
 def repl(orchestrator: Orchestrator, planner_url: str | None) -> None:
@@ -334,6 +473,7 @@ def repl(orchestrator: Orchestrator, planner_url: str | None) -> None:
         print(json.dumps(planned, indent=2))
 
         try:
+            orchestrator.validate_plan(plan)
             orchestrator.execute_plan(plan)
             print("plan executed")
         except Exception as exc:

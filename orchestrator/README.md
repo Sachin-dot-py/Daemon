@@ -38,6 +38,6 @@ forward then turn left then close gripper
 
 ## Optional flags
 - `--telemetry` subscribe to all node telemetry streams
-- `--planner-url https://<vercel>/plan` call remote planner first
+- `--planner-url https://<domain>/api/plan` call remote planner first
 
 If planner call fails or is not provided, fallback planner is used.
