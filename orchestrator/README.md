@@ -5,45 +5,64 @@ Local multi-node runtime glue for DAEMON node endpoints.
 ## Features
 - Connects to multiple DAEMON nodes via TCP
 - Sends `HELLO` and loads each node `MANIFEST <json>`
-- Merges capability catalogs with namespaced routing (`base.FWD`, `arm.GRIP`)
+- Deterministic command catalog merge from the provided `--node` order
+- Namespaced routing (`base.FWD`, `arm.GRIP`) with collision-safe resolution
 - Executes `RUN` and `STOP` steps with optional `duration_ms`
 - Optional telemetry subscription with per-node prefixed output
 - Optional remote planner URL; local fallback planner if remote is unavailable
 - Strict plan validation against per-node manifest command/arg schemas
 
+## Token collisions and namespacing
+- If a token appears on one node only, unqualified token routing is allowed.
+- If multiple nodes expose the same token, unqualified routing is rejected as ambiguous.
+- In collisions, plans must provide explicit `target`.
+
+## Local fallback macros
+Fallback planner (when no planner URL, or planner call fails) supports deterministic open-loop macros:
+- `square`: 4x `[FWD 0.6 for 1200ms, TURN +90 for 800ms]`
+- `left square`: same, but `TURN -90`
+- `straight line`: `FWD 0.6 for 2000ms`, then `STOP`
+- `triangle`: 3x with `TURN +120` (`-120` for left triangle)
+
+These are time-based demos. Closed-loop physical accuracy requires feedback sensors (encoders/IMU) and richer command semantics.
+
 ## Demo run
-0. (YAML manifest support dependency)
+1. Start base emulator:
 ```bash
-python -m pip install PyYAML
+python3 daemon-cli/examples/node-emulator/emulator.py --port 7777 --manifest daemon-cli/examples/manifests/base.yml
 ```
 
-1. Run base emulator:
+2. Start arm emulator:
 ```bash
-python daemon-cli/examples/node-emulator/emulator.py --port 7777 --manifest daemon-cli/examples/manifests/base.yml
-```
-
-2. Run arm emulator:
-```bash
-python daemon-cli/examples/node-emulator/emulator.py --port 7778 --manifest daemon-cli/examples/manifests/arm.yml
+python3 daemon-cli/examples/node-emulator/emulator.py --port 7778 --manifest daemon-cli/examples/manifests/arm.yml
 ```
 
 3. Run orchestrator:
 ```bash
-python orchestrator/orchestrator.py \
+python3 orchestrator/orchestrator.py \
   --node base=localhost:7777 \
   --node arm=localhost:7778 \
   --planner-url https://<domain>/api/plan
 ```
 
-4. Try instruction in REPL:
-```text
-forward then turn left then close gripper
+4. Try instructions in REPL:
+- `forward then close gripper`
+- `square`
+
+5. Run without planner URL:
+```bash
+python3 orchestrator/orchestrator.py --node base=localhost:7777 --node arm=localhost:7778
 ```
 
 ## Optional flags
 - `--telemetry` subscribe to all node telemetry streams
 - `--planner-url https://<domain>/api/plan` call remote planner first
-- `--instruction \"forward then close gripper\"` one-shot mode (no REPL)
+- `--instruction "forward then close gripper"` one-shot mode (no REPL)
 - `--step-timeout 1.0` per-step RUN/STOP response timeout in seconds
 
 If planner URL is down/unreachable/invalid, orchestrator prints a warning and falls back to local planning.
+
+## Tests
+```bash
+python3 -m unittest discover -s orchestrator/tests -v
+```

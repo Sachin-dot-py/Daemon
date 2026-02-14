@@ -6,14 +6,18 @@ build-backend = "setuptools.build_meta"
 name = "daemon-cli"
 version = "0.1.0"
 description = "Daemon firmware generation CLI"
-readme = "readme.txt"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "openai>=1.0.0"
+  "PyYAML>=6.0",
+  "jsonschema>=4.0"
 ]
 
-[project.scripts]
-daemon = "daemon_cli.main:main"
+[project.optional-dependencies]
+ai = ["openai>=1.0.0"]
 
-[tool.setuptools]
-packages = ["daemon_cli"]
+[project.scripts]
+daemon = "daemon_cli.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["daemon_cli*"]

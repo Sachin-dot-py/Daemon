@@ -690,7 +690,7 @@ def generate_with_model(
     try:
         from openai import OpenAI
     except ModuleNotFoundError:
-        fail("Missing dependency 'openai'. Install with: pip install -e daemon-cli")
+        fail("Missing optional dependency 'openai'. Install it inside a virtualenv or pipx-managed environment.")
         raise AssertionError("unreachable")
 
     system_prompt = load_system_prompt(system_prompt_file)

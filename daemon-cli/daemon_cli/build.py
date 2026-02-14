@@ -28,11 +28,15 @@ def run_build(firmware_dir: Path) -> BuildResult:
     if not firmware_dir.exists() or not firmware_dir.is_dir():
         raise BuildError(f"Firmware directory not found: {firmware_dir}")
 
-    commands = discover_annotated_exports(firmware_dir)
+    try:
+        commands = discover_annotated_exports(firmware_dir)
+    except ValueError as exc:
+        raise BuildError(str(exc)) from exc
     if not commands:
         raise BuildError(
             "No exports found. Add annotations in source files using: "
-            "// @daemon:export token=<TOKEN> desc=\"<DESC>\" args=\"<ARG_SPEC>\" safety=\"<SAFETY_SPEC>\""
+            "// @daemon:export token=<TOKEN> desc=\"<DESC>\" args=\"<ARG_SPEC>\" "
+            "safety=\"<SAFETY_SPEC>\" function=<FIRMWARE_FUNCTION>"
         )
 
     tokens = [c.token for c in commands]

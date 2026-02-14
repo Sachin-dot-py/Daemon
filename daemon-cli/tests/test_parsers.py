@@ -25,7 +25,7 @@ class AnnotationParserTests(unittest.TestCase):
             root = Path(temp_dir)
             (root / "main.c").write_text(
                 """
-                // @daemon:export token=L desc=\"Turn left\" args=\"intensity:int[0..255]\" safety=\"rate_hz=20,watchdog_ms=300,clamp=true\"
+                // @daemon:export token=L desc=\"Turn left\" args=\"intensity:int[0..255]\" safety=\"rate_hz=20,watchdog_ms=300,clamp=true\" function=move_left
                 void move_left(int intensity) { }
                 """,
                 encoding="utf-8",
@@ -35,6 +35,20 @@ class AnnotationParserTests(unittest.TestCase):
             self.assertEqual(len(commands), 1)
             self.assertEqual(commands[0].token, "L")
             self.assertEqual(commands[0].function_name, "move_left")
+
+    def test_discover_requires_explicit_function_mapping(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "main.c").write_text(
+                """
+                // @daemon:export token=L desc=\"Turn left\" args=\"intensity:int[0..255]\" safety=\"rate_hz=20,watchdog_ms=300,clamp=true\"
+                void move_left(int intensity) { }
+                """,
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "export requires function=<name>"):
+                discover_annotated_exports(root)
 
 
 if __name__ == "__main__":

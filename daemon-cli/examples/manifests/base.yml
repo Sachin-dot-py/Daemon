@@ -3,6 +3,7 @@ device:
   name: base
   version: "0.1.0"
   node_id: base-node-1
+  manufacturer: Acme Mobility
 commands:
   - token: FWD
     description: Move mobile base forward

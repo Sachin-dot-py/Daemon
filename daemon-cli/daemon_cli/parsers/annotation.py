@@ -6,11 +6,8 @@ from pathlib import Path
 from daemon_cli.models import ArgSpec, CommandSpec, SafetySpec
 
 ANNOTATION_RE = re.compile(
-    r'@daemon:export\s+token=(?P<token>[A-Z0-9_]+)\s+desc="(?P<desc>[^"]+)"\s+args="(?P<args>[^"]*)"\s+safety="(?P<safety>[^"]+)"'
-)
-FUNCTION_RE = re.compile(
-    r'^[\w\s\*]+\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<params>[^\)]*)\)\s*\{',
-    flags=re.MULTILINE,
+    r'@daemon:export\s+token=(?P<token>[A-Z0-9_]+)\s+desc="(?P<desc>[^"]+)"\s+args="(?P<args>[^"]*)"\s+'
+    r'safety="(?P<safety>[^"]+)"(?:\s+function=(?P<function>[A-Za-z_][A-Za-z0-9_]*))?'
 )
 ARG_RE = re.compile(
     r'^(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?P<type>int|float|bool|string)(?:\[(?P<min>-?\d+(?:\.\d+)?)\.\.(?P<max>-?\d+(?:\.\d+)?)\])?$'
@@ -55,13 +52,6 @@ def parse_safety_spec(raw: str) -> SafetySpec:
     return SafetySpec(rate_limit_hz=rate, watchdog_ms=watchdog, clamp=clamp)
 
 
-def _function_after_offset(source: str, offset: int) -> str | None:
-    match = FUNCTION_RE.search(source, offset)
-    if not match:
-        return None
-    return match.group("name")
-
-
 def discover_annotated_exports(firmware_dir: Path) -> list[CommandSpec]:
     commands: list[CommandSpec] = []
     files = list(firmware_dir.rglob("*.c")) + list(firmware_dir.rglob("*.cpp")) + list(firmware_dir.rglob("*.ino"))
@@ -69,9 +59,9 @@ def discover_annotated_exports(firmware_dir: Path) -> list[CommandSpec]:
     for file_path in files:
         text = file_path.read_text(encoding="utf-8", errors="ignore")
         for match in ANNOTATION_RE.finditer(text):
-            function_name = _function_after_offset(text, match.end())
+            function_name = match.group("function")
             if not function_name:
-                continue
+                raise ValueError(f"{file_path}: export requires function=<name>")
 
             token = match.group("token")
             desc = match.group("desc")

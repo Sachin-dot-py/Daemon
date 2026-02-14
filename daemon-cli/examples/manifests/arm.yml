@@ -3,6 +3,7 @@ device:
   name: arm
   version: "0.1.0"
   node_id: arm-node-1
+  manufacturer: Acme Manipulation
 commands:
   - token: ARM_TO
     description: Move arm tool center point

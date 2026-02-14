@@ -3,12 +3,12 @@
 static int g_left = 0;
 static int g_speed = 0;
 
-// @daemon:export token=L desc="Turn left" args="intensity:int[0..255]" safety="rate_hz=20,watchdog_ms=300,clamp=true"
+// @daemon:export token=L desc="Turn left" args="intensity:int[0..255]" safety="rate_hz=20,watchdog_ms=300,clamp=true" function=move_left
 void move_left(int intensity) {
   g_left = intensity;
 }
 
-// @daemon:export token=FWD desc="Move forward" args="speed:int[0..100]" safety="rate_hz=10,watchdog_ms=500,clamp=true"
+// @daemon:export token=FWD desc="Move forward" args="speed:int[0..100]" safety="rate_hz=10,watchdog_ms=500,clamp=true" function=move_forward
 void move_forward(int speed) {
   g_speed = speed;
 }

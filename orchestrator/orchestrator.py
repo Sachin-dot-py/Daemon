@@ -490,7 +490,33 @@ def fallback_plan(instruction: str) -> dict[str, Any]:
     parts = [p.strip() for p in text.replace(",", " then ").split("then") if p.strip()]
 
     plan: list[dict[str, Any]] = []
+    macro_turn_left = "left" in text
+
+    def append_square_steps(turn_left: bool) -> None:
+        turn = -90 if turn_left else 90
+        for _ in range(4):
+            plan.append({"type": "RUN", "target": "base", "token": "FWD", "args": [0.6], "duration_ms": 1200})
+            plan.append({"type": "RUN", "target": "base", "token": "TURN", "args": [turn], "duration_ms": 800})
+
+    def append_triangle_steps(turn_left: bool) -> None:
+        turn = -120 if turn_left else 120
+        for _ in range(3):
+            plan.append({"type": "RUN", "target": "base", "token": "FWD", "args": [0.6], "duration_ms": 1200})
+            plan.append({"type": "RUN", "target": "base", "token": "TURN", "args": [turn], "duration_ms": 800})
+
     for part in parts if parts else [text]:
+        if "square" in part:
+            append_square_steps(turn_left=macro_turn_left or "left" in part)
+            continue
+
+        if "triangle" in part:
+            append_triangle_steps(turn_left=macro_turn_left or "left" in part)
+            continue
+
+        if "straight line" in part:
+            plan.append({"type": "RUN", "target": "base", "token": "FWD", "args": [0.6], "duration_ms": 2000})
+            continue
+
         if "forward" in part:
             plan.append({"type": "RUN", "target": "base", "token": "FWD", "args": [0.6], "duration_ms": 1000})
         if "turn left" in part or " left" in f" {part}":

@@ -11,7 +11,7 @@ class BuildTests(unittest.TestCase):
             root = Path(temp_dir)
             (root / "main.c").write_text(
                 """
-                // @daemon:export token=L desc=\"Turn left\" args=\"intensity:int[0..255]\" safety=\"rate_hz=20,watchdog_ms=300,clamp=true\"
+                // @daemon:export token=L desc=\"Turn left\" args=\"intensity:int[0..255]\" safety=\"rate_hz=20,watchdog_ms=300,clamp=true\" function=move_left
                 void move_left(int intensity) { }
                 """,
                 encoding="utf-8",
@@ -37,6 +37,19 @@ class BuildTests(unittest.TestCase):
             root = Path(temp_dir)
             (root / "main.c").write_text("void foo(void) {}\n", encoding="utf-8")
             with self.assertRaises(BuildError):
+                run_build(root)
+
+    def test_fails_when_function_mapping_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "main.c").write_text(
+                """
+                // @daemon:export token=L desc=\"Turn left\" args=\"intensity:int[0..255]\" safety=\"rate_hz=20,watchdog_ms=300,clamp=true\"
+                void move_left(int intensity) { }
+                """,
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(BuildError, "export requires function=<name>"):
                 run_build(root)
 
 

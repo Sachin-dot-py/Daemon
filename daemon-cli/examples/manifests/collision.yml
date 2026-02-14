@@ -1,0 +1,31 @@
+daemon_version: "0.1"
+device:
+  name: generic_actuator
+  version: "0.1.0"
+  node_id: generic-actuator-1
+  manufacturer: Contoso Robotics
+commands:
+  - token: SET
+    description: Set a generic actuator level
+    args:
+      - name: level
+        type: int
+        min: 0
+        max: 100
+        required: true
+    safety:
+      rate_limit_hz: 10
+      watchdog_ms: 500
+      clamp: true
+    nlp:
+      synonyms: ["set", "set level"]
+      examples: ["set level 50"]
+telemetry:
+  keys:
+    - name: uptime_ms
+      type: int
+      unit: ms
+    - name: last_token
+      type: string
+transport:
+  type: serial-line-v1
