@@ -81,7 +81,7 @@ async function postVisionJson(url, body) {
   return data;
 }
 
-function drawOverlay(canvas, perception) {
+function drawOverlay(canvas, perception, debug) {
   if (!canvas) {
     return;
   }
@@ -95,27 +95,65 @@ function drawOverlay(canvas, perception) {
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
 
-  const target = perception?.selected_target || (perception?.found ? { bbox: perception?.bbox, confidence: perception?.confidence } : null);
-  if (!target?.bbox) {
-    return;
+  const objects = Array.isArray(perception?.objects) ? perception.objects : [];
+  const target = perception?.selected_target || (perception?.found ? { bbox: perception?.bbox, confidence: perception?.confidence, label: "target" } : null);
+
+  const toCanvasRect = (bbox) => {
+    if (!bbox) {
+      return null;
+    }
+    const normalized = bbox.w <= 1 && bbox.h <= 1 && bbox.x <= 1 && bbox.y <= 1;
+    const sx = normalized ? w : w / FRAME_WIDTH;
+    const sy = normalized ? h : h / FRAME_HEIGHT;
+    return { x: bbox.x * sx, y: bbox.y * sy, w: bbox.w * sx, h: bbox.h * sy };
+  };
+
+  for (const obj of objects) {
+    const rect = toCanvasRect(obj?.bbox);
+    if (!rect) continue;
+    ctx.strokeStyle = "rgba(90, 180, 255, 0.7)";
+    ctx.lineWidth = 1.25;
+    ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
   }
-  const { x, y, w: bw, h: bh } = target.bbox;
-  const normalized = bw <= 1 && bh <= 1;
-  const sx = normalized ? w : w / FRAME_WIDTH;
-  const sy = normalized ? h : h / FRAME_HEIGHT;
 
-  ctx.strokeStyle = "#4f8ff8";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(x * sx, y * sy, bw * sx, bh * sy);
+  if (target?.bbox) {
+    const rect = toCanvasRect(target.bbox);
+    if (rect) {
+      ctx.strokeStyle = "#4f8ff8";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
 
-  const labelText = target?.label ? String(target.label) : "target";
-  const label = `${labelText} ${Number(target?.confidence || 0).toFixed(2)}`;
-  ctx.font = "13px ui-monospace, SFMono-Regular, Menlo, monospace";
-  const tw = ctx.measureText(label).width;
-  ctx.fillStyle = "rgba(13, 18, 24, 0.74)";
-  ctx.fillRect(x * sx, Math.max(0, y * sy - 20), tw + 12, 18);
+      const labelText = target?.label ? String(target.label) : "target";
+      const label = `${labelText} ${Number(target?.confidence || 0).toFixed(2)}`;
+      ctx.font = "13px ui-monospace, SFMono-Regular, Menlo, monospace";
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = "rgba(13, 18, 24, 0.84)";
+      ctx.fillRect(rect.x, Math.max(0, rect.y - 20), tw + 12, 18);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(label, rect.x + 6, Math.max(12, rect.y - 7));
+    }
+  }
+
+  const branch = String(debug?.policy_branch || "NONE");
+  const source = String(debug?.perception_source || "none");
+  const selectedLabel = target?.label ? String(target.label) : "-";
+  const selectedConfidence = Number(target?.confidence || 0).toFixed(2);
+  const hudLines = [
+    `branch: ${branch}`,
+    `target: ${selectedLabel}`,
+    `conf: ${selectedConfidence}`,
+    `source: ${source}`
+  ];
+
+  ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
+  const hudWidth = Math.max(...hudLines.map((line) => ctx.measureText(line).width)) + 12;
+  const hudHeight = hudLines.length * 16 + 8;
+  ctx.fillStyle = "rgba(10, 12, 15, 0.68)";
+  ctx.fillRect(8, 8, hudWidth, hudHeight);
   ctx.fillStyle = "#ffffff";
-  ctx.fillText(label, x * sx + 6, Math.max(12, y * sy - 7));
+  hudLines.forEach((line, idx) => {
+    ctx.fillText(line, 14, 24 + idx * 16);
+  });
 }
 
 async function orchestratorStatus(orchestratorBaseUrl) {
@@ -219,8 +257,8 @@ function App() {
   }, [taskPrompt]);
 
   useEffect(() => {
-    drawOverlay(overlayCanvasRef.current, perception);
-  }, [perception]);
+    drawOverlay(overlayCanvasRef.current, perception, lastDebug);
+  }, [perception, lastDebug]);
 
   useEffect(() => {
     let cancelled = false;
@@ -346,9 +384,7 @@ function App() {
       const visionPayload = {
         frame_jpeg_base64,
         instruction: taskPrompt.trim(),
-        state: stateRef.current,
-        system_manifest: null,
-        telemetry_snapshot: null
+        state: stateRef.current
       };
 
       const visionResponse = await postVisionJson(`${VERCEL_BASE_URL}/api/vision_step`, visionPayload);

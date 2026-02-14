@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import jpeg from "jpeg-js";
+import fs from "node:fs";
+import path from "node:path";
 
 export const runtime = "nodejs";
 
@@ -128,6 +130,7 @@ const ALIGN_OFFSET_THRESHOLD = 0.07;
 const SEARCH_STEP_DEG = 12;
 const CLOSE_AREA_THRESHOLD = 0.09;
 const OPENAI_MIN_CONFIDENCE = 0.35;
+let FILE_ENV_CACHE: Record<string, string> | null = null;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -150,6 +153,71 @@ function toNumberOr(defaultValue: number, value: unknown): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function parseDotEnv(text: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const lines = text.split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
+function loadFileEnv(): Record<string, string> {
+  if (FILE_ENV_CACHE) {
+    return FILE_ENV_CACHE;
+  }
+
+  const cwd = process.cwd();
+  const candidates = [
+    path.join(cwd, ".env.local"),
+    path.join(cwd, ".env"),
+    path.join(cwd, "..", ".env.local"),
+    path.join(cwd, "..", ".env")
+  ];
+
+  const merged: Record<string, string> = {};
+  for (const file of candidates) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const parsed = parseDotEnv(fs.readFileSync(file, "utf8"));
+      Object.assign(merged, parsed);
+    } catch {
+      // Ignore unreadable dotenv files and continue with remaining candidates.
+    }
+  }
+
+  FILE_ENV_CACHE = merged;
+  return merged;
+}
+
+function envValue(...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const runtime = process.env[key];
+    if (typeof runtime === "string" && runtime.trim()) {
+      return runtime.trim();
+    }
+  }
+
+  const fileEnv = loadFileEnv();
+  for (const key of keys) {
+    const value = fileEnv[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return undefined;
 }
 
 function normalizeState(input: unknown): VisionState {
@@ -292,7 +360,7 @@ function extractLabel(query: string | null): string | null {
   if (tokens.length === 0) return null;
 
   const joined = tokens.join(" ");
-  const canonical = ["banana", "cube", "box", "bottle", "backpack", "obstacle"];
+  const canonical = ["phone", "banana", "cube", "box", "bottle", "backpack", "obstacle"];
   for (const item of canonical) {
     if (joined.includes(item)) {
       return item;
@@ -549,7 +617,7 @@ function sanitizeObject(raw: any): PerceivedObject | null {
   if (!raw || typeof raw !== "object") return null;
   const label = typeof raw.label === "string" ? raw.label.trim() : "";
   const confidence = typeof raw.confidence === "number" ? clamp(raw.confidence, 0, 1) : 0;
-  const bbox = raw.bbox;
+  const bbox = raw.bbox || raw.bbox_norm;
   if (!label || !bbox || typeof bbox !== "object") return null;
 
   const x = typeof bbox.x === "number" ? clamp(bbox.x, 0, 1) : 0;
@@ -569,9 +637,13 @@ function sanitizeObject(raw: any): PerceivedObject | null {
 }
 
 async function detectObjectsWithOpenAI(frameBase64: string, instruction: string): Promise<OpenAIPerception> {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = envValue("OPENAI_API_KEY", "OPEN_AI_API_KEY");
   if (!apiKey) {
-    return { objects: [], summary: "OpenAI perception unavailable (missing OPENAI_API_KEY)", error: "missing_api_key" };
+    return {
+      objects: [],
+      summary: "OpenAI perception unavailable (missing OPENAI_API_KEY or OPEN_AI_API_KEY)",
+      error: "missing_api_key"
+    };
   }
 
   const schema = {
@@ -621,7 +693,7 @@ async function detectObjectsWithOpenAI(frameBase64: string, instruction: string)
         Authorization: `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini",
+        model: envValue("OPENAI_VISION_MODEL") || "gpt-4.1-mini",
         temperature: 0,
         input: [
           {
@@ -630,7 +702,7 @@ async function detectObjectsWithOpenAI(frameBase64: string, instruction: string)
               {
                 type: "input_text",
                 text:
-                  "Return strict JSON only. Detect visible objects relevant for robot navigation/manipulation. Bounding boxes must be normalized [0..1]."
+                  "Return strict JSON only. Detect visible objects relevant for robot navigation/manipulation. Bounding boxes must be normalized [0..1]. Use label aliases for common items (e.g., phone/cell phone/mobile phone/smartphone)."
               }
             ]
           },
@@ -689,15 +761,34 @@ async function detectObjectsWithOpenAI(frameBase64: string, instruction: string)
   }
 }
 
+function canonicalLabel(raw: string): string {
+  const label = raw.toLowerCase().trim();
+  const aliases: Array<{ canonical: string; terms: string[] }> = [
+    { canonical: "phone", terms: ["phone", "cell phone", "mobile phone", "smartphone", "iphone", "android phone"] },
+    { canonical: "bottle", terms: ["bottle", "water bottle"] },
+    { canonical: "backpack", terms: ["backpack", "bag", "rucksack"] },
+    { canonical: "cube", terms: ["cube", "block"] },
+    { canonical: "box", terms: ["box", "package"] }
+  ];
+
+  for (const group of aliases) {
+    if (group.terms.some((term) => label === term || label.includes(term))) {
+      return group.canonical;
+    }
+  }
+
+  return label;
+}
+
 function selectTarget(objects: PerceivedObject[], parsed: ParsedInstruction): PerceivedObject | undefined {
   if (objects.length === 0) return undefined;
 
-  const targetLabel = parsed.target.label?.toLowerCase() || "";
+  const targetLabel = parsed.target.label ? canonicalLabel(parsed.target.label) : "";
   const targetColor = parsed.target.color || null;
-  const targetQuery = parsed.target.query?.toLowerCase() || "";
+  const targetQuery = parsed.target.query ? canonicalLabel(parsed.target.query) : "";
 
   const scored = objects.map((obj) => {
-    const label = obj.label.toLowerCase();
+    const label = canonicalLabel(obj.label);
     const attrs = (obj.attributes || []).map((v) => v.toLowerCase());
     let score = obj.confidence;
 
