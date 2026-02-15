@@ -158,6 +158,8 @@ interface VisionState {
 interface SystemManifestInput {
   nodes?: Array<{
     name?: unknown;
+    node_id?: unknown;
+    display_name?: unknown;
     commands?: Array<{
       token?: unknown;
     }>;
@@ -1818,7 +1820,21 @@ function buildAllowedTokenMap(manifest: unknown): Map<string, Set<string>> | nul
         }
       }
     }
-    allowed.set(node.name, tokenSet);
+
+    // Accept multiple stable identifiers for the same node.
+    // Orchestrator manifests include name + node_id (and sometimes display_name).
+    const keys = new Set<string>();
+    keys.add(node.name);
+    if (typeof (node as Record<string, unknown>).node_id === "string") {
+      keys.add(String((node as Record<string, unknown>).node_id));
+    }
+    if (typeof (node as Record<string, unknown>).display_name === "string") {
+      keys.add(String((node as Record<string, unknown>).display_name));
+    }
+    for (const key of keys) {
+      if (!key.trim()) continue;
+      allowed.set(key, tokenSet);
+    }
   }
 
   return allowed;

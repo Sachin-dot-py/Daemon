@@ -848,7 +848,9 @@ fn orchestrator_spawn(
         .stderr(Stdio::from(log_file_err));
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn orchestrator: {e}"))?;
-    wait_for_tcp_listen(http_host_ip, http_port, &mut child, Duration::from_secs(3))
+    // orchestrator.py connects to nodes before it starts the HTTP bridge, and each node connect
+    // can take a couple seconds (DNS + TCP timeout). Give it enough time to come up.
+    wait_for_tcp_listen(http_host_ip, http_port, &mut child, Duration::from_secs(12))
         .map_err(|e| format!("{e}. If a previous orchestrator is running, stop it or use a different port."))?;
 
     let http_base_url = format!("http://{}:{}", http_host_raw.trim(), http_port);
