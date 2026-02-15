@@ -252,6 +252,51 @@ function App() {
   const [nodeProbeResults, setNodeProbeResults] = useState([]);
   const [hardwareBusy, setHardwareBusy] = useState(false);
   const [capabilities, setCapabilities] = useState(INITIAL_STATE.capabilities);
+  const [traceLog, setTraceLog] = useState([]);
+  const [backendAuditLog, setBackendAuditLog] = useState("");
+  const traceSeqRef = useRef(0);
+
+  const persistTraceToFile = async (entry) => {
+    if (!RUNTIME_IS_TAURI) {
+      return;
+    }
+    try {
+      await invoke("write_debug_log", { fileName: "ui_trace.jsonl", payload: entry });
+      const event = String(entry?.event || "");
+      if (event.startsWith("vision.")) {
+        await invoke("write_debug_log", { fileName: "vision_trace.jsonl", payload: entry });
+      } else if (event.startsWith("orchestrator.")) {
+        await invoke("write_debug_log", { fileName: "orchestrator_trace.jsonl", payload: entry });
+      }
+    } catch {
+      // Ignore logging failures.
+    }
+  };
+
+  const appendTrace = (event, payload = {}) => {
+    const entry = {
+      id: traceSeqRef.current++,
+      ts: new Date().toISOString(),
+      event,
+      payload
+    };
+    setTraceLog((prev) => [...prev, entry].slice(-200));
+    void persistTraceToFile(entry);
+    // Keep browser devtools useful while also rendering logs in-app.
+    console.log("[DAEMON_TRACE]", entry);
+  };
+
+  const refreshBackendAuditLog = async () => {
+    if (!RUNTIME_IS_TAURI) {
+      return;
+    }
+    try {
+      const text = await invoke("read_debug_log", { fileName: "backend_audit.jsonl", tailLines: 250 });
+      setBackendAuditLog(String(text || ""));
+    } catch {
+      // Ignore: optional diagnostics.
+    }
+  };
 
   const promptReady = taskPrompt.trim().length > 0;
   const draftReady = draftPrompt.trim().length > 0;
@@ -270,7 +315,17 @@ function App() {
     return `Applied prompt: "${taskPrompt}". Edit text and click Send to update behavior on the next frame.`;
   }, [taskPrompt]);
 
-  const applyPrompt = () => {
+  const resetSessionStateForPrompt = () => {
+    const seeded = { ...INITIAL_STATE, capabilities: { ...capabilities } };
+    setFsmState(seeded);
+    stateRef.current = seeded;
+    setPerception(null);
+    setLastPlan([]);
+    setLastDebug(null);
+    setChartSeries([]);
+  };
+
+  const applyPrompt = async () => {
     const next = draftPrompt.trim();
     if (!next) {
       setErrorText("Task prompt is required.");
@@ -278,12 +333,21 @@ function App() {
     }
     setTaskPrompt(next);
     appliedPromptRef.current = next;
+    resetSessionStateForPrompt();
+    appendTrace("prompt.apply", { prompt: next });
     setErrorText("");
+
+    // Submit should trigger action immediately without requiring Single Step.
+    await executeSingleVisionStep({ executePlan: !dryRun });
   };
 
   useEffect(() => {
     appliedPromptRef.current = taskPrompt.trim() || DEFAULT_PROMPT;
   }, [taskPrompt]);
+
+  useEffect(() => {
+    refreshBackendAuditLog();
+  }, []);
 
   useEffect(() => {
     drawOverlay(overlayCanvasRef.current, perception, lastDebug);
@@ -334,6 +398,36 @@ function App() {
       .filter(Boolean);
   };
 
+  const probeNodesInternal = async (endpoints) => {
+    const results = [];
+    for (const entry of endpoints) {
+      const match = entry.match(/^[^=]+=([^:]+):(\d+)$/);
+      if (!match) {
+        results.push({ entry, ok: false, error: "Expected format alias=host:port" });
+        continue;
+      }
+      const host = match[1];
+      const port = Number.parseInt(match[2], 10);
+      const resp = await invoke("node_probe", { host, port });
+      results.push({ entry, ...resp });
+    }
+
+    setNodeProbeResults(results);
+    const firstOk = results.find((item) => item?.ok);
+    if (firstOk) {
+      const alias = String(firstOk.entry || "").split("=", 1)[0] || "base";
+      const tokens = Array.isArray(firstOk.tokens) ? firstOk.tokens.map((t) => String(t).toUpperCase()) : [];
+      setCapabilities((prev) => ({
+        ...prev,
+        base_target: alias,
+        base_fwd_token: tokens.includes("FWD") ? "FWD" : prev.base_fwd_token,
+        base_turn_token: tokens.includes("TURN") ? "TURN" : prev.base_turn_token
+      }));
+    }
+
+    return results;
+  };
+
   const probeNodes = async () => {
     if (!RUNTIME_IS_TAURI) {
       setErrorText("Node probe requires Tauri runtime.");
@@ -341,36 +435,14 @@ function App() {
     }
 
     setHardwareBusy(true);
+    const endpoints = parseNodeEndpoints();
+    appendTrace("nodes.probe.start", { endpoints });
     try {
-      const endpoints = parseNodeEndpoints();
-      const results = [];
-      for (const entry of endpoints) {
-        const match = entry.match(/^[^=]+=([^:]+):(\d+)$/);
-        if (!match) {
-          results.push({ entry, ok: false, error: "Expected format alias=host:port" });
-          continue;
-        }
-        const host = match[1];
-        const port = Number.parseInt(match[2], 10);
-        const resp = await invoke("node_probe", { host, port });
-        results.push({ entry, ...resp });
-      }
-      setNodeProbeResults(results);
-
-      const firstOk = results.find((item) => item?.ok);
-      if (firstOk) {
-        const alias = String(firstOk.entry || "").split("=", 1)[0] || "base";
-        const tokens = Array.isArray(firstOk.tokens) ? firstOk.tokens.map((t) => String(t).toUpperCase()) : [];
-        setCapabilities((prev) => ({
-          ...prev,
-          base_target: alias,
-          base_fwd_token: tokens.includes("FWD") ? "FWD" : prev.base_fwd_token,
-          base_turn_token: tokens.includes("TURN") ? "TURN" : prev.base_turn_token
-        }));
-      }
-
+      const results = await probeNodesInternal(endpoints);
       setErrorText("");
+      appendTrace("nodes.probe.result", { results });
     } catch (error) {
+      appendTrace("nodes.probe.error", { error: String(error) });
       setErrorText(`Probe failed: ${String(error)}`);
     } finally {
       setHardwareBusy(false);
@@ -384,6 +456,7 @@ function App() {
     }
 
     setHardwareBusy(true);
+    appendTrace("orchestrator.spawn.start", { nodes: parseNodeEndpoints() });
     try {
       const nodes = parseNodeEndpoints();
       const proc = await invoke("orchestrator_spawn", {
@@ -395,8 +468,11 @@ function App() {
       if (proc?.httpBaseUrl) {
         setOrchestratorBaseUrl(proc.httpBaseUrl);
       }
+      appendTrace("orchestrator.spawn.ok", { proc });
+      await refreshBackendAuditLog();
       setErrorText("");
     } catch (error) {
+      appendTrace("orchestrator.spawn.error", { error: String(error) });
       setErrorText(`Start orchestrator failed: ${String(error)}`);
     } finally {
       setHardwareBusy(false);
@@ -410,11 +486,15 @@ function App() {
     }
 
     setHardwareBusy(true);
+    appendTrace("orchestrator.process_stop.start", {});
     try {
       const proc = await invoke("orchestrator_stop_process");
       setOrchestratorProc(proc);
+      appendTrace("orchestrator.process_stop.ok", { proc });
+      await refreshBackendAuditLog();
       setErrorText("");
     } catch (error) {
+      appendTrace("orchestrator.process_stop.error", { error: String(error) });
       setErrorText(`Stop orchestrator failed: ${String(error)}`);
     } finally {
       setHardwareBusy(false);
@@ -495,6 +575,8 @@ function App() {
       setLastOrchestratorError("");
       setLastActionText("STOP OK");
       setLastActionTimestamp(nowStamp());
+      appendTrace("orchestrator.stop.ok", { orchestratorBaseUrl });
+      await refreshBackendAuditLog();
     } catch (error) {
       const msg = String(error);
       setOrchestratorReachable(false);
@@ -502,6 +584,7 @@ function App() {
       setLastActionText("STOP FAILED");
       setLastActionTimestamp(nowStamp());
       setErrorText(`STOP failed: ${msg}`);
+      appendTrace("orchestrator.stop.error", { orchestratorBaseUrl, error: msg });
     }
   };
 
@@ -511,12 +594,62 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!RUNTIME_IS_TAURI) {
+      return;
+    }
+    let cancelled = false;
+    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const bootstrap = async () => {
+      try {
+        const nodes = parseNodeEndpoints();
+        appendTrace("bootstrap.start", { nodes });
+        const proc = await invoke("orchestrator_spawn", {
+          nodes,
+          httpPort: 5055,
+          httpHost: "127.0.0.1"
+        });
+        if (cancelled) return;
+        setOrchestratorProc(proc);
+        if (proc?.httpBaseUrl) {
+          setOrchestratorBaseUrl(proc.httpBaseUrl);
+        }
+        appendTrace("bootstrap.orchestrator.ok", { proc });
+
+        for (let attempt = 1; attempt <= 5; attempt += 1) {
+          if (cancelled) return;
+          const results = await probeNodesInternal(nodes).catch((error) => {
+            appendTrace("bootstrap.probe.error", { attempt, error: String(error) });
+            return [];
+          });
+          const ok = Array.isArray(results) && results.some((r) => r?.ok);
+          appendTrace("bootstrap.probe.attempt", { attempt, ok, results });
+          if (ok) {
+            setErrorText("");
+            break;
+          }
+          await delay(1500);
+        }
+      } catch (error) {
+        appendTrace("bootstrap.error", { error: String(error) });
+      } finally {
+        await refreshBackendAuditLog();
+      }
+    };
+
+    void bootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const executeSingleVisionStep = async ({ executePlan }) => {
     if (inFlightRef.current) {
       return;
     }
 
-    if (!promptReady) {
+    if (!appliedPromptRef.current.trim()) {
       setErrorText("Task prompt is required.");
       return;
     }
@@ -537,11 +670,23 @@ function App() {
         instruction: instructionToSend,
         state: stateRef.current
       };
+      appendTrace("vision.step.request", {
+        executePlan,
+        dryRun,
+        instruction: instructionToSend,
+        stateStage: String(stateRef.current?.stage || "SEARCH")
+      });
       setLastSentInstruction(instructionToSend);
 
       const visionResponse = await postVisionJson(`${VERCEL_BASE_URL}/api/vision_step`, visionPayload);
       const nextState = visionResponse?.state || stateRef.current;
       const nextPlan = Array.isArray(visionResponse?.plan) ? visionResponse.plan : [];
+      appendTrace("vision.step.response", {
+        stage: String(nextState?.stage || ""),
+        planLength: nextPlan.length,
+        plan: nextPlan,
+        debug: visionResponse?.debug || null
+      });
 
       stateRef.current = nextState;
       setFsmState(nextState);
@@ -574,6 +719,11 @@ function App() {
       setErrorText("");
 
       if (executePlan) {
+        appendTrace("orchestrator.execute_plan.request", {
+          orchestratorBaseUrl,
+          planLength: nextPlan.length,
+          plan: nextPlan
+        });
         const response = await orchestratorExecutePlan(orchestratorBaseUrl, nextPlan);
         if (!response?.ok) {
           throw new Error(response?.error || "execute_plan returned non-ok response");
@@ -581,8 +731,11 @@ function App() {
         setOrchestratorReachable(true);
         setLastOrchestratorError("");
         setLastActionText("EXECUTE_PLAN OK");
+        appendTrace("orchestrator.execute_plan.ok", { response });
+        await refreshBackendAuditLog();
       } else {
         setLastActionText("DRY RUN: plan generated only");
+        appendTrace("orchestrator.execute_plan.skipped", { dryRun: true, planLength: nextPlan.length });
       }
 
       setLastActionTimestamp(nowStamp());
@@ -597,6 +750,7 @@ function App() {
       setLastOrchestratorError(msg);
       setLastActionText("STEP FAILED");
       setLastActionTimestamp(nowStamp());
+      appendTrace("vision.step.error", { error: msg });
 
       if (liveEnabled) {
         await stopLoop({ sendStop: true });
@@ -728,12 +882,12 @@ function App() {
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
-                applyPrompt();
+                void applyPrompt();
               }
             }}
             placeholder="pick up the banana"
           />
-          <button className="secondary" onClick={applyPrompt} disabled={!draftReady}>Send</button>
+          <button className="secondary" onClick={() => void applyPrompt()} disabled={!draftReady}>Send</button>
           <button
             className="ghost"
             onClick={() => {
@@ -772,6 +926,22 @@ function App() {
         <div><strong>Vision API:</strong> {VERCEL_BASE_URL}</div>
         <div><strong>Applied instruction:</strong> {taskPrompt}</div>
         <div><strong>Last sent instruction:</strong> {lastSentInstruction || "-"}</div>
+      </section>
+
+      <section className="panel">
+        <h2>Submit Trace</h2>
+        <div className="controls" style={{ justifyContent: "flex-start" }}>
+          <button className="secondary" onClick={() => setTraceLog([])}>Clear UI Trace</button>
+          <button className="secondary" onClick={refreshBackendAuditLog} disabled={!RUNTIME_IS_TAURI}>
+            Refresh Backend Audit
+          </button>
+        </div>
+        <pre>{traceLog.length ? traceLog.map((x) => JSON.stringify(x)).join("\n") : "No trace events yet."}</pre>
+      </section>
+
+      <section className="panel">
+        <h2>Tauri Backend Audit Log</h2>
+        <pre>{backendAuditLog || "No backend audit lines yet."}</pre>
       </section>
 
       {lastOrchestratorError ? <section className="error">Last orchestrator error: {lastOrchestratorError}</section> : null}

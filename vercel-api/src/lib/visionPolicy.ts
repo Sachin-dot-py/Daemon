@@ -1,6 +1,6 @@
 export type TaskType = "stop" | "move-pattern" | "pick-object" | "follow" | "search" | "avoid+approach" | "unknown";
 
-export type MotionPattern = "circle" | "square" | "triangle" | "forward";
+export type MotionPattern = "circle" | "square" | "triangle" | "forward" | "backward";
 
 export interface TargetSpec {
   query: string | null;
@@ -206,7 +206,7 @@ export function parseInstruction(instruction: string): ParsedInstruction {
     };
   }
 
-  if (/circle|square|triangle|move forward|go forward/.test(text)) {
+  if (/circle|square|triangle|move forward|go forward|move backward|go backward|move back|go back|reverse/.test(text)) {
     if (/circle/.test(text)) {
       return { task_type: "move-pattern", pattern: "circle", count: parseCount(text), target };
     }
@@ -218,7 +218,7 @@ export function parseInstruction(instruction: string): ParsedInstruction {
     }
     return {
       task_type: "move-pattern",
-      pattern: "forward",
+      pattern: /(move backward|go backward|move back|go back|reverse)\b/.test(text) ? "backward" : "forward",
       distance_m: parseDistanceMeters(text) ?? 1,
       count: 1,
       target

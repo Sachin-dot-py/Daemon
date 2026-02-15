@@ -36,6 +36,12 @@ run("parseInstruction move-pattern circle 3", () => {
   assert.equal(parsed.count, 3);
 });
 
+run("parseInstruction move-pattern backward", () => {
+  const parsed = parseInstruction("move backward 1 meter");
+  assert.equal(parsed.task_type, "move-pattern");
+  assert.equal(parsed.pattern, "backward");
+});
+
 run("parseInstruction pick-object phone", () => {
   const parsed = parseInstruction("pick up the phone");
   assert.equal(parsed.task_type, "pick-object");

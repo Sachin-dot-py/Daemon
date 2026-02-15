@@ -7,6 +7,22 @@ This runbook installs and runs the **DAEMON node server** on the Raspberry Pi th
 
 The desktop app should talk to the **local orchestrator** (HTTP bridge). The orchestrator talks to the Pi node.
 
+## Quickstart From `raspberry_pi` Directory
+
+If you want one command that mirrors the root `SETUP.md` flow (desktop app dev server + vercel API dev server + orchestrator), run:
+
+```bash
+cd daemon-cli/firmware-code/profiles/rc_car_pi_arduino/raspberry_pi
+./daemon build
+```
+
+Useful helpers:
+
+```bash
+./daemon status
+./daemon clean
+```
+
 ## 0) SSH Into The Pi
 
 From your laptop:

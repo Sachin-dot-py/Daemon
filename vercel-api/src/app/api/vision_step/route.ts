@@ -34,7 +34,7 @@ function corsHeaders(origin: string | null): HeadersInit {
 type Stage = "SEARCH" | "ALIGN" | "APPROACH" | "GRAB" | "DONE" | "MOTION_ONLY";
 type TaskType = "stop" | "move-pattern" | "pick-object" | "follow" | "search" | "avoid+approach" | "unknown";
 
-type MotionPattern = "circle" | "square" | "triangle" | "forward";
+type MotionPattern = "circle" | "square" | "triangle" | "forward" | "backward";
 
 interface TargetSpec {
   query: string | null;
@@ -1275,6 +1275,10 @@ function buildMotionSteps(parsed: ParsedInstruction, caps: Capabilities): PlanSt
 
   const distance = clamp(parsed.distance_m || 1, 0.1, 10);
   const duration = clamp(Math.round(distance * 1800), 250, 8000);
+  if (parsed.pattern === "backward") {
+    steps.push(runStep(caps.base_target, "BWD", [0.55], duration));
+    return steps;
+  }
   steps.push(runStep(caps.base_target, caps.base_fwd_token, [0.55], duration));
   return steps;
 }

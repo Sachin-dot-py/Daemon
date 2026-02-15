@@ -9,6 +9,7 @@ use std::{fs::OpenOptions};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
 
 const SERIAL_EVENT: &str = "serial_line";
@@ -166,6 +167,102 @@ fn resolve_python3() -> String {
     "python3".to_string()
 }
 
+fn unix_ts_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn trunc_for_log(input: &str, max_len: usize) -> String {
+    if input.len() <= max_len {
+        return input.to_string();
+    }
+    let cut = input
+        .char_indices()
+        .nth(max_len)
+        .map(|(idx, _)| idx)
+        .unwrap_or(input.len());
+    format!("{}...(truncated)", &input[..cut])
+}
+
+fn append_desktop_audit_log(event: &str, payload: &Value) {
+    let logs_dir = match repo_logs_dir() {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    if std::fs::create_dir_all(&logs_dir).is_err() {
+        return;
+    }
+    let log_path = logs_dir.join("backend_audit.jsonl");
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    let line = json!({
+        "ts_ms": unix_ts_ms(),
+        "event": event,
+        "payload": payload
+    });
+    let _ = writeln!(file, "{}", line);
+}
+
+fn repo_logs_dir() -> Result<PathBuf, String> {
+    Ok(find_repo_root()?.join("logs"))
+}
+
+fn sanitize_log_file_name(file_name: &str) -> Result<String, String> {
+    let trimmed = file_name.trim();
+    if trimmed.is_empty() {
+        return Err("file_name cannot be empty".to_string());
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains("..") {
+        return Err("file_name must be a plain file name under logs/".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+#[tauri::command]
+fn write_debug_log(file_name: String, payload: Value) -> Result<(), String> {
+    let safe_name = sanitize_log_file_name(&file_name)?;
+    let logs_dir = repo_logs_dir()?;
+    std::fs::create_dir_all(&logs_dir)
+        .map_err(|e| format!("Failed to create logs directory {}: {e}", logs_dir.display()))?;
+    let path = logs_dir.join(safe_name);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to open {}: {e}", path.display()))?;
+    let line = json!({
+        "ts_ms": unix_ts_ms(),
+        "payload": payload
+    });
+    writeln!(file, "{}", line)
+        .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn read_debug_log(file_name: String, tail_lines: Option<usize>) -> Result<String, String> {
+    let safe_name = sanitize_log_file_name(&file_name)?;
+    let path = repo_logs_dir()?.join(safe_name);
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let limit = tail_lines.unwrap_or(300).max(1);
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(limit);
+    Ok(lines[start..].join("\n"))
+}
+
 fn parse_manifest_summary(manifest: &Value) -> NodeManifestSummary {
     let device_name = manifest
         .get("device")
@@ -249,6 +346,7 @@ async fn orchestrator_request(
     let base = normalize_base_url(&orchestrator_base_url)?;
     let url = format!("{base}{path}");
     let client = reqwest::Client::new();
+    let request_body = body.clone();
     let request = client.request(method.clone(), &url);
     let request = if let Some(payload) = body {
         request.json(&payload)
@@ -256,8 +354,26 @@ async fn orchestrator_request(
         request
     };
 
+    append_desktop_audit_log(
+        "orchestrator.request",
+        &json!({
+            "method": method.to_string(),
+            "url": url.clone(),
+            "body": request_body
+        }),
+    );
+
     let response = request.send().await.map_err(|error| {
-        format!("{method} {url} failed: network error: {error}")
+        let msg = format!("{method} {url} failed: network error: {error}");
+        append_desktop_audit_log(
+            "orchestrator.network_error",
+            &json!({
+                "method": method.to_string(),
+                "url": url.clone(),
+                "error": msg
+            }),
+        );
+        msg
     })?;
 
     let status = response.status();
@@ -265,6 +381,16 @@ async fn orchestrator_request(
         .text()
         .await
         .map_err(|error| format!("{method} {url} failed: could not read response body: {error}"))?;
+
+    append_desktop_audit_log(
+        "orchestrator.response",
+        &json!({
+            "method": method.to_string(),
+            "url": url.clone(),
+            "status": status.as_u16(),
+            "body": trunc_for_log(&response_text, 8000)
+        }),
+    );
 
     if !status.is_success() {
         return Err(format!(
@@ -277,6 +403,20 @@ async fn orchestrator_request(
     serde_json::from_str::<Value>(&response_text).map_err(|error| {
         format!("{method} {url} failed: invalid JSON response: {error}; body={response_text}")
     })
+}
+
+#[tauri::command]
+fn read_desktop_audit_log(tail_lines: Option<usize>) -> Result<String, String> {
+    let path = repo_logs_dir()?.join("backend_audit.jsonl");
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let limit = tail_lines.unwrap_or(300).max(1);
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(limit);
+    Ok(lines[start..].join("\n"))
 }
 
 #[tauri::command]
@@ -635,6 +775,9 @@ pub fn run() {
             orchestrator_execute_plan,
             orchestrator_stop,
             node_probe,
+            write_debug_log,
+            read_debug_log,
+            read_desktop_audit_log,
             orchestrator_spawn,
             orchestrator_stop_process,
             orchestrator_process_status

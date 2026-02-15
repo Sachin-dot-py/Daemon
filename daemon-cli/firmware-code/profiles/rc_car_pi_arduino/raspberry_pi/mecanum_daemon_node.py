@@ -28,6 +28,7 @@ and relies on the orchestrator for timing (it will call STOP after duration_ms).
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import socket
 import threading
@@ -116,6 +117,21 @@ class MecanumSerial:
         self._ser: serial.Serial | None = None
         self._serial_ok = False
 
+    def _candidate_ports(self) -> list[str]:
+        explicit = self._port.strip()
+        candidates: list[str] = []
+        if explicit and explicit.lower() != "auto":
+            candidates.append(explicit)
+        candidates.extend(sorted(glob.glob("/dev/serial/by-id/*")))
+        candidates.extend(["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyACM2", "/dev/ttyUSB0", "/dev/ttyUSB1"])
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            if item not in seen:
+                deduped.append(item)
+                seen.add(item)
+        return deduped
+
     def _open(self) -> None:
         if self._ser:
             try:
@@ -124,10 +140,20 @@ class MecanumSerial:
                 pass
             self._ser = None
 
-        self._ser = serial.Serial(self._port, self._baud, timeout=1)
-        # Most Arduino boards reset on open.
-        time.sleep(2.0)
-        self._serial_ok = True
+        last_exc: Exception | None = None
+        for candidate in self._candidate_ports():
+            try:
+                self._ser = serial.Serial(candidate, self._baud, timeout=1)
+                # Most Arduino boards reset on open.
+                time.sleep(2.0)
+                self._port = candidate
+                self._serial_ok = True
+                return
+            except Exception as exc:
+                last_exc = exc
+                self._serial_ok = False
+                self._ser = None
+        raise RuntimeError(f"Failed to open serial on any candidate port: {last_exc}")
 
     def serial_ok(self) -> bool:
         return bool(self._serial_ok and self._ser and self._ser.is_open)
@@ -369,7 +395,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="DAEMON node for RC car mecanum base (Pi+Arduino)")
     ap.add_argument("--listen", default="::", help="Bind address (default: :: for dual-stack)")
     ap.add_argument("--port", type=int, default=8765, help="TCP port (default: 8765)")
-    ap.add_argument("--serial", default="/dev/ttyACM0", help="Arduino serial device path")
+    ap.add_argument(
+        "--serial",
+        default="auto",
+        help="Arduino serial device path. Use 'auto' to probe /dev/serial/by-id and ttyACM* (default: auto)",
+    )
     ap.add_argument("--baud", type=int, default=9600, help="Serial baud (default: 9600)")
     ap.add_argument("--node-id", default="base", help="Manifest device.node_id")
     ap.add_argument("--name", default="rc-car-mecanum", help="Manifest device.name")

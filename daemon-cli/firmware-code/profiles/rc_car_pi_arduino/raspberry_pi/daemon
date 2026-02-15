@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+STATE_FILE = SCRIPT_DIR / ".daemon_build_state.json"
+LOG_DIR = SCRIPT_DIR / ".daemon_logs"
+
+
+def _find_repo_root(start: Path) -> Path:
+    current = start
+    while True:
+        if (current / "SETUP.md").exists() and (current / "desktop-app").exists():
+            return current
+        if current.parent == current:
+            raise RuntimeError("Could not find monorepo root containing SETUP.md and desktop-app")
+        current = current.parent
+
+
+def _run(cmd: list[str], cwd: Path) -> None:
+    print(f"$ (cd {cwd} && {' '.join(cmd)})")
+    subprocess.run(cmd, cwd=str(cwd), check=True)
+
+
+def _is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _terminate_process(pid: int, name: str) -> None:
+    if not _is_alive(pid):
+        return
+
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if not _is_alive(pid):
+            return
+        time.sleep(0.1)
+
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    print(f"Force-killed {name} (pid {pid})")
+
+
+def _load_state() -> dict:
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_state(state: dict) -> None:
+    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _start_background(name: str, cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> dict:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"{name}.log"
+    log_file = log_path.open("a", encoding="utf-8")
+
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        env=env,
+    )
+
+    print(f"Started {name} (pid {process.pid}). Log: {log_path}")
+    return {
+        "name": name,
+        "pid": process.pid,
+        "cmd": cmd,
+        "cwd": str(cwd),
+        "log": str(log_path),
+    }
+
+
+def handle_build(_args: argparse.Namespace) -> int:
+    root = _find_repo_root(SCRIPT_DIR)
+    desktop_app = root / "desktop-app"
+    vercel_api = root / "vercel-api"
+    orchestrator_dir = root / "orchestrator"
+
+    for required in [desktop_app, vercel_api, orchestrator_dir]:
+        if not required.exists():
+            raise RuntimeError(f"Required path not found: {required}")
+
+    handle_clean(argparse.Namespace(silent=True))
+
+    _run(["npm", "install"], desktop_app)
+    _run(["npm", "install"], vercel_api)
+
+    # Mirror SETUP.md workflow in separate long-lived processes.
+    services: list[dict] = []
+    services.append(_start_background("desktop_app", ["npm", "run", "tauri", "dev"], desktop_app))
+    services.append(_start_background("vercel_api", ["npm", "run", "dev"], vercel_api))
+
+    subprocess.run(["pkill", "-f", "orchestrator/orchestrator.py"], check=False)
+    services.append(
+        _start_background(
+            "orchestrator",
+            [
+                "python3",
+                "orchestrator.py",
+                "--node",
+                "base=vporto26.local:8766",
+                "--node",
+                "arm=vporto26.local:8767",
+                "--http-port",
+                "5055",
+            ],
+            orchestrator_dir,
+        )
+    )
+
+    state = {
+        "root": str(root),
+        "started_at": int(time.time()),
+        "services": services,
+    }
+    _save_state(state)
+
+    print("\nDAEMON build workflow started.")
+    print(f"State file: {STATE_FILE}")
+    print(f"Logs dir:   {LOG_DIR}")
+    print("\nUse './daemon status' to inspect running processes.")
+    print("Use './daemon clean' to stop them.")
+    return 0
+
+
+def handle_clean(args: argparse.Namespace) -> int:
+    state = _load_state()
+    services = state.get("services", []) if isinstance(state, dict) else []
+
+    for service in services:
+        if not isinstance(service, dict):
+            continue
+        pid = int(service.get("pid", 0) or 0)
+        name = str(service.get("name", "service"))
+        if pid > 0:
+            _terminate_process(pid, name)
+            if not getattr(args, "silent", False):
+                print(f"Stopped {name} (pid {pid})")
+
+    if STATE_FILE.exists():
+        STATE_FILE.unlink()
+    if not getattr(args, "silent", False):
+        print("Clean complete.")
+    return 0
+
+
+def handle_status(_args: argparse.Namespace) -> int:
+    state = _load_state()
+    services = state.get("services", []) if isinstance(state, dict) else []
+
+    if not services:
+        print("No running services tracked. Run './daemon build'.")
+        return 0
+
+    print(f"Repo root: {state.get('root', 'unknown')}")
+    for service in services:
+        name = service.get("name", "service")
+        pid = int(service.get("pid", 0) or 0)
+        alive = _is_alive(pid) if pid > 0 else False
+        log = service.get("log", "")
+        status = "running" if alive else "stopped"
+        print(f"- {name}: pid={pid} status={status} log={log}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="daemon",
+        description="Run the root SETUP.md workflow from raspberry_pi directory.",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    b = sub.add_parser("build", help="Start desktop-app, vercel-api, and orchestrator")
+    b.set_defaults(handler=handle_build)
+
+    c = sub.add_parser("clean", help="Stop processes started by 'daemon build'")
+    c.set_defaults(handler=handle_clean)
+
+    s = sub.add_parser("status", help="Show process status")
+    s.set_defaults(handler=handle_status)
+
+    h = sub.add_parser("help", help="Show help")
+    h.set_defaults(handler=lambda _args: (parser.print_help(), 0)[1])
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not args.command:
+        parser.print_help()
+        return 0
+
+    handler = getattr(args, "handler", None)
+    if handler is None:
+        parser.print_help()
+        return 1
+
+    try:
+        return int(handler(args) or 0)
+    except subprocess.CalledProcessError as exc:
+        print(f"Command failed with exit code {exc.returncode}", file=sys.stderr)
+        return exc.returncode
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
