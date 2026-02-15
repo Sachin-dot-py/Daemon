@@ -32,7 +32,7 @@ function corsHeaders(origin: string | null): HeadersInit {
 }
 
 type Stage = "SEARCH" | "ALIGN" | "APPROACH" | "GRAB" | "DONE" | "MOTION_ONLY";
-type TaskType = "stop" | "move-pattern" | "pick-object" | "follow" | "search" | "avoid+approach" | "unknown";
+type TaskType = "stop" | "move-pattern" | "move-if-clear" | "pick-object" | "follow" | "search" | "avoid+approach" | "unknown";
 
 type MotionPattern = "circle" | "square" | "triangle";
 type CanonicalMoveDirection = "forward" | "backward" | "left" | "right";
@@ -1150,6 +1150,27 @@ async function analyzePerception(
   }
 
   const notes: string[] = [];
+
+  // For color-gated motion tasks, prefer the deterministic pixel fallback first.
+  // This keeps latency low and avoids relying on OpenAI to label colors consistently.
+  if (parsed.task_type === "move-if-clear") {
+    const fallbackColor = toSupportedFallbackColor(parsed.target.color);
+    if (fallbackColor) {
+      const fbStart = Date.now();
+      const fallbackObjects = detectByColorFallback(frameBase64, fallbackColor);
+      const selectedFallback = fallbackObjects[0];
+      if (selectedFallback) {
+        notes.push(`Fallback color detector used for ${fallbackColor} (move-if-clear)`);
+        return {
+          perception: composePerception(fallbackObjects, selectedFallback, `Fallback detection for ${fallbackColor}`),
+          source: "fallback_color",
+          notes: [...notes, `schedule=${schedule.reason}`],
+          target_scoring: selectTargetWithTraceDeterministic(fallbackObjects, parsed, targetLockCtx),
+          timings_ms: { fast_track: 0, full_model: 0, select: 0, fallback: Date.now() - fbStart }
+        };
+      }
+    }
+  }
   const fastTrackStart = Date.now();
   const fastTracked = schedule.allow_fast_track
     ? maybeBuildFastTrackPerception(parsed, targetLockCtx, cachedPerception, motionScore)
@@ -1512,6 +1533,33 @@ function buildPlanAndState(
     next.stage = "DONE";
     policyBranch = "STOP/E_STOP";
     notes.push(parsed.stop_kind === "emergency" ? "Emergency stop requested" : "Stop requested");
+    plan.push(stopStep());
+    return { state: next, plan, policyBranch, notes };
+  }
+
+  if (parsed.task_type === "move-if-clear") {
+    // Keep emitting short forward steps while the gated target is absent. Stop as soon as it is present.
+    // This is intended for prompts like: "go forward if there is no red object ahead".
+    policyBranch = "MOVE/IF_CLEAR";
+    const target = perception.selected_target;
+    const inPath = Boolean(
+      target &&
+        perception.confidence >= Math.max(0.25, next.learning_ctx.confidence_floor) &&
+        perception.area >= 0.02 &&
+        Math.abs(perception.offset_x) <= 0.28
+    );
+
+    if (inPath) {
+      next.stage = "DONE";
+      notes.push("Obstacle detected in path; stopping");
+      plan.push(stopStep());
+      return { state: next, plan, policyBranch, notes };
+    }
+
+    next.stage = "SEARCH";
+    notes.push("Path appears clear; stepping forward");
+    // Small duration so we can stop quickly on the next frame when an obstacle appears.
+    plan.push(runStep(caps.base_target, caps.base_fwd_token, [0.45], 240));
     plan.push(stopStep());
     return { state: next, plan, policyBranch, notes };
   }

@@ -50,6 +50,12 @@ run("parseInstruction canonical MOVE strafe synonyms", () => {
   assert.equal((parsed.canonical_actions?.[0] as any)?.direction, "right");
 });
 
+run("parseInstruction move-if-clear red object gate", () => {
+  const parsed = parseInstruction("go forward if there is no red object ahead of it");
+  assert.equal(parsed.task_type, "move-if-clear");
+  assert.equal(parsed.target.color, "red");
+});
+
 run("parseInstruction pick-object phone", () => {
   const parsed = parseInstruction("pick up the phone");
   assert.equal(parsed.task_type, "pick-object");
@@ -144,6 +150,7 @@ run("move-pattern bypasses perception", () => {
   assert.equal(shouldBypassPerceptionTask("stop"), true);
   assert.equal(shouldBypassPerceptionTask("pick-object"), false);
   assert.equal(shouldBypassPerceptionTask("follow"), false);
+  assert.equal(shouldBypassPerceptionTask("move-if-clear"), false);
 });
 
 run("selection trace marks required target when absent", () => {

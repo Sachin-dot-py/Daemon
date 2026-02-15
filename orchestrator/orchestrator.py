@@ -55,7 +55,9 @@ class Orchestrator:
         nodes: list[NodeInfo],
         telemetry: bool = False,
         timeout_s: float = 3.0,
-        step_timeout_s: float = 1.0,
+        # Nodes (especially Pi->Arduino bridges) may briefly block while recovering USB/serial.
+        # Keep this generous so a single slow RUN doesn't fail the whole plan.
+        step_timeout_s: float = 4.0,
     ):
         self.nodes = nodes
         self.enable_telemetry = telemetry
@@ -65,9 +67,28 @@ class Orchestrator:
         self.catalog_unqualified: dict[str, NodeInfo] = {}
 
     def connect_all(self) -> None:
+        errors: list[dict[str, str]] = []
         for node in self.nodes:
-            self._connect_node(node)
+            try:
+                self._connect_node(node)
+            except Exception as exc:
+                # Degraded mode: keep orchestrator running even if some nodes are offline.
+                # The HTTP bridge + desktop app can still come up and show the status.
+                errors.append({"node": node.alias, "error": str(exc)})
+                node.running = False
+                if node.sock is not None:
+                    try:
+                        node.sock.close()
+                    except OSError:
+                        pass
+                node.sock = None
+                node.manifest = {}
+                node.node_name = ""
+                node.node_id = ""
+                _log_event("node.connect.error", node=node.alias, error=str(exc))
         self._build_catalogs()
+        if errors:
+            _log_event("orchestrator.connect_all.degraded", nodes_failed=len(errors), errors=errors)
 
     def close_all(self) -> None:
         for node in self.nodes:
@@ -542,7 +563,8 @@ class Orchestrator:
                 if node.sock is None:
                     print(f"stop warning [{node.alias}]: socket not connected")
                     continue
-                response = self._request(node, "STOP", timeout=0.8, correlation_id=correlation_id)
+                # STOP can block briefly if a node is recovering USB/serial; keep this > typical reset delay.
+                response = self._request(node, "STOP", timeout=2.5, correlation_id=correlation_id)
                 if response != "OK":
                     print(f"stop warning [{node.alias}]: {response}")
             except Exception as exc:
@@ -850,7 +872,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner-url", default=None, help="Remote planner URL (e.g. https://.../plan)")
     parser.add_argument("--telemetry", action="store_true", help="Subscribe to node telemetry and print it")
     parser.add_argument("--instruction", default=None, help="One-shot instruction (non-interactive)")
-    parser.add_argument("--step-timeout", type=float, default=1.0, help="Per-step RUN/STOP response timeout (seconds)")
+    parser.add_argument("--step-timeout", type=float, default=4.0, help="Per-step RUN/STOP response timeout (seconds)")
     parser.add_argument("--http-host", default="127.0.0.1", help="HTTP bridge bind host")
     parser.add_argument("--http-port", type=int, default=None, help="HTTP bridge bind port")
     return parser.parse_args()

@@ -544,7 +544,8 @@ function App() {
       const proc = await invoke("orchestrator_spawn", {
         nodes,
         httpPort: 5055,
-        httpHost: "127.0.0.1"
+        httpHost: "127.0.0.1",
+        stepTimeoutS: 4.0
       });
       setOrchestratorProc(proc);
       if (proc?.httpBaseUrl) {
@@ -703,7 +704,8 @@ function App() {
         const proc = await invoke("orchestrator_spawn", {
           nodes,
           httpPort: 5055,
-          httpHost: "127.0.0.1"
+          httpHost: "127.0.0.1",
+          stepTimeoutS: 4.0
         });
         if (cancelled) return;
         setOrchestratorProc(proc);

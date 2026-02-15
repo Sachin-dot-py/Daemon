@@ -1,4 +1,12 @@
-export type TaskType = "stop" | "move-pattern" | "pick-object" | "follow" | "search" | "avoid+approach" | "unknown";
+export type TaskType =
+  | "stop"
+  | "move-pattern"
+  | "move-if-clear"
+  | "pick-object"
+  | "follow"
+  | "search"
+  | "avoid+approach"
+  | "unknown";
 
 export type MotionPattern = "circle" | "square" | "triangle";
 
@@ -174,6 +182,11 @@ function extractLabel(query: string | null): string | null {
   return tokens[tokens.length - 1];
 }
 
+function extractStandaloneColor(text: string): TargetSpec["color"] {
+  const match = text.match(/\b(red|blue|green|yellow)\b/);
+  return match?.[1] ? match[1].toLowerCase() : null;
+}
+
 export function canonicalLabel(raw: string): string {
   const label = raw.toLowerCase().trim();
   const aliases: Array<{ canonical: string; terms: string[] }> = [
@@ -201,6 +214,19 @@ export function parseInstruction(instruction: string): ParsedInstruction {
   if (!targetQuery && /\b(?:person|human|man|woman|someone|people)\b/.test(text)) {
     targetQuery = PERSON_CANONICAL;
   }
+
+  // If the user refers to a color obstacle/object without an explicit "go to the ..." target phrase,
+  // synthesize a target so the pixel fallback detector can be used.
+  if (!targetQuery) {
+    const color = extractStandaloneColor(text);
+    if (color && /\b(object|obstacle|block|barrier|ring)\b/.test(text)) {
+      const labelMatch = text.match(/\b(obstacle|block|barrier|ring)\b/);
+      const label = labelMatch?.[1] ? labelMatch[1] : "obstacle";
+      // Use a non-stopword label so extractColor() keeps the color token.
+      targetQuery = `${color} ${label}`;
+    }
+  }
+
   const target: TargetSpec = {
     query: targetQuery,
     color: extractColor(targetQuery),
@@ -236,6 +262,21 @@ export function parseInstruction(instruction: string): ParsedInstruction {
   ) {
     const distance = parseDistanceMeters(text) ?? 1;
     const speed = 0.55;
+
+    // Conditional motion that depends on visual absence/presence of a colored obstacle.
+    // Example: "go forward if there is no red object" should *not* bypass perception.
+    const hasNegatedVisionGate =
+      /\bif\b/.test(text) && /\b(no|not|can't|cannot|dont|don't)\b/.test(text) && Boolean(target.color);
+    const hasUntilVisionGate = /\buntil\b/.test(text) && Boolean(target.color);
+    if ((hasNegatedVisionGate || hasUntilVisionGate) && /\b(?:forward|move forward|go forward|drive forward|ahead)\b/.test(text)) {
+      return {
+        task_type: "move-if-clear",
+        canonical_actions: [{ type: "MOVE", direction: "forward", distance_m: distance, speed }],
+        distance_m: distance,
+        count: 1,
+        target
+      };
+    }
 
     if (/\bturn\s+(?:to\s+)?(?:the\s+)?left\b|\brotate\s+left\b|\bcounterclockwise\b/.test(text)) {
       return {
@@ -418,7 +459,8 @@ export function selectTargetWithTraceDeterministic(
     (parsed.task_type === "pick-object" ||
       parsed.task_type === "follow" ||
       parsed.task_type === "search" ||
-      parsed.task_type === "avoid+approach") &&
+      parsed.task_type === "avoid+approach" ||
+      parsed.task_type === "move-if-clear") &&
     Boolean(targetLabel || queryTokens.length > 0 || targetColor);
 
   const matchesTarget = (candidate: PerceivedObject): boolean => {

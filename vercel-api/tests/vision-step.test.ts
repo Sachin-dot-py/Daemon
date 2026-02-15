@@ -25,6 +25,19 @@ function makeFrameBase64() {
   return jpeg.encode({ data, width, height }, 65).data.toString("base64");
 }
 
+function makeRedFrameBase64() {
+  const width = 24;
+  const height = 24;
+  const data = Buffer.alloc(width * height * 4, 0);
+  for (let i = 0; i < width * height; i += 1) {
+    data[i * 4 + 0] = 255;
+    data[i * 4 + 1] = 0;
+    data[i * 4 + 2] = 0;
+    data[i * 4 + 3] = 255;
+  }
+  return jpeg.encode({ data, width, height }, 65).data.toString("base64");
+}
+
 function instructionHash(instruction: string) {
   const normalized = instruction.toLowerCase().replace(/\s+/g, " ").trim();
   let hash = 0x811c9dc5;
@@ -181,6 +194,33 @@ run("task validation fails when qualifier does not match selected target", async
     assert.equal(out.debug?.task_validation?.checks?.target_label_ok, true);
     assert.equal(out.debug?.task_validation?.checks?.target_color_ok, false);
     assert.equal(out.state?.task_eval_ctx?.last_outcome, "failure");
+  } finally {
+    restore();
+  }
+});
+
+run("move-if-clear: emits forward steps when red not present", async () => {
+  const restore = installOpenAIMock(() => []);
+  try {
+    const out = await postVision(makeFrameBase64(), "go forward if there is no red object ahead", {});
+    assert.equal(out.debug?.parsed_instruction?.task_type, "move-if-clear");
+    assert.equal(out.debug?.parsed_instruction?.target?.color, "red");
+    assert.equal(out.debug?.policy_branch, "MOVE/IF_CLEAR");
+    const runStep = (Array.isArray(out.plan) ? out.plan : []).find((step: any) => step?.type === "RUN");
+    assert.equal(runStep?.token, "FWD");
+  } finally {
+    restore();
+  }
+});
+
+run("move-if-clear: stops when red obstacle is present", async () => {
+  const restore = installOpenAIMock(() => []);
+  try {
+    const out = await postVision(makeRedFrameBase64(), "go forward if there is no red object ahead", {});
+    assert.equal(out.debug?.parsed_instruction?.task_type, "move-if-clear");
+    assert.equal(out.debug?.policy_branch, "MOVE/IF_CLEAR");
+    assert.equal(out.perception?.found, true);
+    assert.equal(out.plan?.[0]?.type, "STOP");
   } finally {
     restore();
   }
