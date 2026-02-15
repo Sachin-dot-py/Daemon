@@ -24,6 +24,7 @@ import argparse
 import json
 import math
 import re
+import socket
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -656,6 +657,18 @@ class VisionBrain:
 
 
 def run_server(*, listen: str, port: int, brain: VisionBrain) -> None:
+    class DualStackServer(ThreadingHTTPServer):
+        # Bind an IPv6 socket with dual-stack enabled so `.local` can resolve to either v4 or v6.
+        address_family = socket.AF_INET6
+
+        def server_bind(self) -> None:  # noqa: N802
+            try:
+                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except OSError:
+                # Some kernels/platforms may not support toggling this; proceed best-effort.
+                pass
+            super().server_bind()
+
     class Handler(BaseHTTPRequestHandler):
         def _write(self, code: int, payload: dict[str, Any]) -> None:
             raw = _json(payload)
@@ -786,14 +799,17 @@ def run_server(*, listen: str, port: int, brain: VisionBrain) -> None:
         def log_message(self, _format: str, *_args: Any) -> None:
             return
 
-    httpd = ThreadingHTTPServer((listen, int(port)), Handler)
+    if listen in {"::", ""}:
+        httpd = DualStackServer((listen, int(port)), Handler)
+    else:
+        httpd = ThreadingHTTPServer((listen, int(port)), Handler)
     print(f"pi_vision_brain listening on http://{listen}:{port}")
     httpd.serve_forever()
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--listen", default="0.0.0.0")
+    ap.add_argument("--listen", default="::")
     ap.add_argument("--port", type=int, default=8090)
     ap.add_argument("--snapshot-url", default="http://127.0.0.1:8081/snapshot.jpg")
     ap.add_argument("--enable-person", action="store_true", help="Enable HOG person detector (slower).")
