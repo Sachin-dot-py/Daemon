@@ -1,0 +1,38 @@
+{"instruction": "move backward", "label": {"task_type": "unknown"}}
+{"instruction": "move forward", "label": {"task_type": "move-pattern", "pattern": "forward", "count": 1, "distance_m": 1.0}}
+{"instruction": "move behind", "label": {"task_type": "unknown"}}
+{"instruction": "can you move in a square?", "label": {"task_type": "move-pattern", "pattern": "square", "count": 1}}
+{"instruction": "move in a square", "label": {"task_type": "move-pattern", "pattern": "square", "count": 1}}
+{"instruction": "move forward", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "forward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move and grab the red thing with the hook", "label": {"task_type": "pick-object"}}
+{"instruction": "move forward and grab the red thing with the hook", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "forward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "go forward if there is no red object seen in the camera ahead of it", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "forward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move forward if there is no red object visible in the camera", "label": {"task_type": "move-if-clear", "canonical_actions": [{"direction": "forward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move forward if the red object is not visible in the camera", "label": {"task_type": "move-if-clear", "canonical_actions": [{"direction": "forward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move forward if the red object is not visible in the camera else do nothing", "label": {"task_type": "move-if-clear", "canonical_actions": [{"direction": "forward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move until the red object", "label": {"task_type": "unknown"}}
+{"instruction": "move until you reach the red object", "label": {"task_type": "unknown"}}
+{"instruction": "move back", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "backward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move forward then back, and then move left if tehre is a red object visible", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "left", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move forward then back", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "forward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move forward then move back", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "backward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move forward first and then move back", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "backward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "go behind", "label": {"task_type": "unknown"}}
+{"instruction": "go backward", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "backward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "go back", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "backward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move right", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "right", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move right then straight", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "right", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move in a triangle", "label": {"task_type": "move-pattern", "pattern": "triangle", "count": 1}}
+{"instruction": "move in a triangl", "label": {"task_type": "unknown"}}
+{"instruction": "move forward if you don\u2019t see a red square", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "forward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}]}}
+{"instruction": "if the camera sees something red then move forward. if it doesn\u2019t see something red then move backward", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "forward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}, {"direction": "backward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}]}}
+{"instruction": "move left, then right, then back, then open the claw", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "left", "distance_m": 1, "speed": 0.55, "type": "MOVE"}, {"direction": "right", "distance_m": 1, "speed": 0.55, "type": "MOVE"}]}}
+{"instruction": "move left, then right, then move back, and then open the claw", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "left", "distance_m": 1, "speed": 0.55, "type": "MOVE"}, {"direction": "right", "distance_m": 1, "speed": 0.55, "type": "MOVE"}, {"direction": "backward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}]}}
+{"instruction": "move left, then right, then move back, and then open the claw, and then close the claw", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "left", "distance_m": 1, "speed": 0.55, "type": "MOVE"}, {"direction": "right", "distance_m": 1, "speed": 0.55, "type": "MOVE"}, {"direction": "backward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}]}}
+{"instruction": "open the claw then move left and right", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "left", "distance_m": 1, "speed": 0.55, "type": "MOVE"}]}}
+{"instruction": "Close the claw then move left and then move right twice", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "left", "distance_m": 1, "speed": 0.55, "type": "MOVE"}, {"direction": "right", "distance_m": 1, "speed": 0.55, "type": "MOVE"}]}}
+{"instruction": "move left twice", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "left", "distance_m": 1, "speed": 0.55, "type": "MOVE"}]}}
+{"instruction": "if you see a white square, move backward. if you don\u2019t see a white square, then move forward", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "backward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}, {"direction": "forward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}]}}
+{"instruction": "if you don\u2019t see a white square, move backward.", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "backward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}]}}
+{"instruction": "go right and then left", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "right", "distance_m": 1, "speed": 0.55, "type": "MOVE"}, {"direction": "left", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
+{"instruction": "move forward then backward", "label": {"task_type": "move-pattern", "canonical_actions": [{"direction": "forward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}, {"direction": "backward", "distance_m": 1, "speed": 0.55, "type": "MOVE"}], "count": 1, "distance_m": 1.0}}
