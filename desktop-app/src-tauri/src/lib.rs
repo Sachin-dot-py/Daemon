@@ -342,12 +342,18 @@ async fn orchestrator_request(
     orchestrator_base_url: String,
     path: &str,
     body: Option<Value>,
+    correlation_id: Option<String>,
 ) -> Result<Value, String> {
     let base = normalize_base_url(&orchestrator_base_url)?;
     let url = format!("{base}{path}");
     let client = reqwest::Client::new();
     let request_body = body.clone();
     let request = client.request(method.clone(), &url);
+    let request = if let Some(cid) = correlation_id.as_ref() {
+        request.header("X-Correlation-Id", cid)
+    } else {
+        request
+    };
     let request = if let Some(payload) = body {
         request.json(&payload)
     } else {
@@ -359,7 +365,8 @@ async fn orchestrator_request(
         &json!({
             "method": method.to_string(),
             "url": url.clone(),
-            "body": request_body
+            "body": request_body,
+            "correlation_id": correlation_id
         }),
     );
 
@@ -552,19 +559,21 @@ fn send_serial_line(state: State<'_, AppState>, line: String) -> Result<(), Stri
 
 #[tauri::command]
 async fn orchestrator_status(orchestrator_base_url: String) -> Result<Value, String> {
-    orchestrator_request(reqwest::Method::GET, orchestrator_base_url, "/status", None).await
+    orchestrator_request(reqwest::Method::GET, orchestrator_base_url, "/status", None, None).await
 }
 
 #[tauri::command]
 async fn orchestrator_execute_plan(
     orchestrator_base_url: String,
     plan: Value,
+    correlation_id: Option<String>,
 ) -> Result<Value, String> {
     orchestrator_request(
         reqwest::Method::POST,
         orchestrator_base_url,
         "/execute_plan",
-        Some(json!({ "plan": plan })),
+        Some(json!({ "plan": plan, "correlation_id": correlation_id.clone() })),
+        correlation_id,
     )
     .await
 }
@@ -576,6 +585,7 @@ async fn orchestrator_stop(orchestrator_base_url: String) -> Result<Value, Strin
         orchestrator_base_url,
         "/stop",
         Some(json!({})),
+        None,
     )
     .await
 }

@@ -22,6 +22,7 @@ const INITIAL_STATE = {
     arm_target: "arm",
     base_turn_token: "TURN",
     base_fwd_token: "FWD",
+    base_strafe_token: "STRAFE",
     arm_grip_token: "GRIP"
   }
 };
@@ -30,6 +31,17 @@ const DEFAULT_PROMPT = "pick up the banana";
 
 function nowStamp() {
   return new Date().toLocaleTimeString();
+}
+
+function makeCorrelationId() {
+  try {
+    if (globalThis.crypto?.randomUUID) {
+      return `ui-${globalThis.crypto.randomUUID()}`;
+    }
+  } catch {
+    // ignore
+  }
+  return `ui-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 async function blobToBase64(blob) {
@@ -66,10 +78,13 @@ async function captureFrameBase64(video, canvas) {
   return blobToBase64(blob);
 }
 
-async function postVisionJson(url, body) {
+async function postVisionJson(url, body, correlationId) {
   const resp = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Correlation-Id": correlationId
+    },
     body: JSON.stringify(body)
   });
 
@@ -172,10 +187,10 @@ async function orchestratorStatus(orchestratorBaseUrl) {
   return resp.json();
 }
 
-async function orchestratorExecutePlan(orchestratorBaseUrl, plan) {
+async function orchestratorExecutePlan(orchestratorBaseUrl, plan, correlationId) {
   if (RUNTIME_IS_TAURI) {
     try {
-      return await invoke("orchestrator_execute_plan", { orchestratorBaseUrl, plan });
+      return await invoke("orchestrator_execute_plan", { orchestratorBaseUrl, plan, correlationId });
     } catch (error) {
       throw new Error(`Tauri proxy POST ${orchestratorBaseUrl}/execute_plan failed: ${String(error)}`);
     }
@@ -183,8 +198,11 @@ async function orchestratorExecutePlan(orchestratorBaseUrl, plan) {
 
   const resp = await fetch(`${orchestratorBaseUrl}/execute_plan`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ plan })
+    headers: {
+      "Content-Type": "application/json",
+      "X-Correlation-Id": correlationId
+    },
+    body: JSON.stringify({ plan, correlation_id: correlationId })
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
@@ -421,7 +439,8 @@ function App() {
         ...prev,
         base_target: alias,
         base_fwd_token: tokens.includes("FWD") ? "FWD" : prev.base_fwd_token,
-        base_turn_token: tokens.includes("TURN") ? "TURN" : prev.base_turn_token
+        base_turn_token: tokens.includes("TURN") ? "TURN" : prev.base_turn_token,
+        base_strafe_token: tokens.includes("STRAFE") ? "STRAFE" : prev.base_strafe_token
       }));
     }
 
@@ -665,12 +684,15 @@ function App() {
       }
 
       const instructionToSend = appliedPromptRef.current.trim();
+      const correlationId = makeCorrelationId();
       const visionPayload = {
         frame_jpeg_base64,
         instruction: instructionToSend,
+        correlation_id: correlationId,
         state: stateRef.current
       };
       appendTrace("vision.step.request", {
+        correlationId,
         executePlan,
         dryRun,
         instruction: instructionToSend,
@@ -678,10 +700,12 @@ function App() {
       });
       setLastSentInstruction(instructionToSend);
 
-      const visionResponse = await postVisionJson(`${VERCEL_BASE_URL}/api/vision_step`, visionPayload);
+      const visionResponse = await postVisionJson(`${VERCEL_BASE_URL}/api/vision_step`, visionPayload, correlationId);
       const nextState = visionResponse?.state || stateRef.current;
       const nextPlan = Array.isArray(visionResponse?.plan) ? visionResponse.plan : [];
+      const planCorrelationId = String(visionResponse?.correlation_id || correlationId);
       appendTrace("vision.step.response", {
+        correlationId: planCorrelationId,
         stage: String(nextState?.stage || ""),
         planLength: nextPlan.length,
         plan: nextPlan,
@@ -720,18 +744,19 @@ function App() {
 
       if (executePlan) {
         appendTrace("orchestrator.execute_plan.request", {
+          correlationId: planCorrelationId,
           orchestratorBaseUrl,
           planLength: nextPlan.length,
           plan: nextPlan
         });
-        const response = await orchestratorExecutePlan(orchestratorBaseUrl, nextPlan);
+        const response = await orchestratorExecutePlan(orchestratorBaseUrl, nextPlan, planCorrelationId);
         if (!response?.ok) {
           throw new Error(response?.error || "execute_plan returned non-ok response");
         }
         setOrchestratorReachable(true);
         setLastOrchestratorError("");
         setLastActionText("EXECUTE_PLAN OK");
-        appendTrace("orchestrator.execute_plan.ok", { response });
+        appendTrace("orchestrator.execute_plan.ok", { correlationId: planCorrelationId, response });
         await refreshBackendAuditLog();
       } else {
         setLastActionText("DRY RUN: plan generated only");

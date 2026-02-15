@@ -46,19 +46,25 @@ function parseBody(body: unknown): MecanumPlanRequest {
 
 export async function handleMecanumPlanRequest(request: Request): Promise<NextResponse> {
   let body: unknown;
+  let correlationId = request.headers.get("x-correlation-id") || `mecanum-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   try {
     body = await request.json();
   } catch (error) {
     return badRequest("Invalid JSON body.", { cause: (error as Error).message });
   }
+  if (isObject(body) && typeof body.correlation_id === "string" && body.correlation_id.trim()) {
+    correlationId = body.correlation_id.trim();
+  }
 
   try {
     const parsed = parseBody(body);
     const response = await createMecanumPlan(parsed);
+    console.log(JSON.stringify({ event: "mecanum.plan.ok", correlation_id: correlationId, instruction: parsed.instruction, plan: response.plan }));
     return NextResponse.json(response, { status: 200 });
   } catch (error) {
     if (error instanceof ValidationError) {
+      console.log(JSON.stringify({ event: "mecanum.plan.error", correlation_id: correlationId, message: error.message, details: error.details ?? null }));
       return NextResponse.json(
         {
           error: error.code,
@@ -78,4 +84,3 @@ export async function handleMecanumPlanRequest(request: Request): Promise<NextRe
     );
   }
 }
-

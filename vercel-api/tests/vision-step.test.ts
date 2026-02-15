@@ -63,14 +63,15 @@ function installOpenAIMock(resolver: (instruction: string) => MockObject[]) {
   };
 }
 
-async function postVision(frame: string, instruction: string, state: unknown) {
+async function postVision(frame: string, instruction: string, state: unknown, extras?: Record<string, unknown>) {
   const req = new Request("http://localhost/api/vision_step", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       frame_jpeg_base64: frame,
       instruction,
-      state
+      state,
+      ...extras
     })
   });
   const res = await POST(req);
@@ -196,6 +197,22 @@ run("performance behavior: stable lock tightens interval, off_track relaxes inte
   assert.equal(computeOpenAIFramePeriod("on_track", true), 3);
   assert.equal(computeOpenAIFramePeriod("uncertain", true), 1);
   assert.equal(computeOpenAIFramePeriod("off_track", false), 1);
+});
+
+run("manifest-aware canonical MOVE left maps to STRAFE", async () => {
+  const manifest = {
+    nodes: [
+      {
+        name: "base",
+        commands: [{ token: "STRAFE" }, { token: "FWD" }, { token: "TURN" }, { token: "STOP" }]
+      }
+    ]
+  };
+  const out = await postVision(makeFrameBase64(), "strafe left", {}, { system_manifest: manifest });
+  const run = (Array.isArray(out.plan) ? out.plan : []).find((step: any) => step?.type === "RUN");
+  assert.equal(run?.token, "STRAFE");
+  assert.equal(run?.args?.[0], "L");
+  assert.equal(out?.debug?.manifest_guard?.dropped_steps, 0);
 });
 
 async function main() {

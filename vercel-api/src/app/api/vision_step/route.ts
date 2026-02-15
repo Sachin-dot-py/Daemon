@@ -34,7 +34,13 @@ function corsHeaders(origin: string | null): HeadersInit {
 type Stage = "SEARCH" | "ALIGN" | "APPROACH" | "GRAB" | "DONE" | "MOTION_ONLY";
 type TaskType = "stop" | "move-pattern" | "pick-object" | "follow" | "search" | "avoid+approach" | "unknown";
 
-type MotionPattern = "circle" | "square" | "triangle" | "forward" | "backward";
+type MotionPattern = "circle" | "square" | "triangle";
+type CanonicalMoveDirection = "forward" | "backward" | "left" | "right";
+type CanonicalTurnDirection = "left" | "right";
+type CanonicalAction =
+  | { type: "MOVE"; direction: CanonicalMoveDirection; distance_m?: number; speed?: number }
+  | { type: "TURN"; direction: CanonicalTurnDirection; angle_deg?: number; speed?: number }
+  | { type: "STOP" };
 
 interface TargetSpec {
   query: string | null;
@@ -47,6 +53,7 @@ interface ParsedInstruction {
   stop_kind?: "normal" | "emergency";
   target: TargetSpec;
   pattern?: MotionPattern;
+  canonical_actions?: CanonicalAction[];
   count?: number;
   distance_m?: number;
 }
@@ -85,6 +92,7 @@ interface Capabilities {
   arm_target: string;
   base_turn_token: string;
   base_fwd_token: string;
+  base_strafe_token: string;
   arm_grip_token: string;
 }
 
@@ -206,6 +214,7 @@ const DEFAULT_STATE: VisionState = {
     arm_target: "arm",
     base_turn_token: "TURN",
     base_fwd_token: "FWD",
+    base_strafe_token: "STRAFE",
     arm_grip_token: "GRIP"
   },
   instruction_ctx: {
@@ -264,6 +273,20 @@ const CLOSE_AREA_THRESHOLD = 0.09;
 const OPENAI_MIN_CONFIDENCE = 0.35;
 const TASK_METRICS_FILE = path.join(process.cwd(), ".daemon", "vision_task_metrics.json");
 let FILE_ENV_CACHE: Record<string, string> | null = null;
+
+function logVisionTrace(event: string, correlationId: string, payload: Record<string, unknown>) {
+  console.log(
+    JSON.stringify({
+      event,
+      correlation_id: correlationId,
+      ...payload
+    })
+  );
+}
+
+function generateCorrelationId(): string {
+  return `vision-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -542,6 +565,7 @@ function normalizeState(input: unknown): VisionState {
       arm_target: toStringOr(DEFAULT_STATE.capabilities.arm_target, capabilitiesInput.arm_target),
       base_turn_token: toStringOr(DEFAULT_STATE.capabilities.base_turn_token, capabilitiesInput.base_turn_token),
       base_fwd_token: toStringOr(DEFAULT_STATE.capabilities.base_fwd_token, capabilitiesInput.base_fwd_token),
+      base_strafe_token: toStringOr(DEFAULT_STATE.capabilities.base_strafe_token, capabilitiesInput.base_strafe_token),
       arm_grip_token: toStringOr(DEFAULT_STATE.capabilities.arm_grip_token, capabilitiesInput.arm_grip_token)
     },
     instruction_ctx: {
@@ -1239,8 +1263,59 @@ function stopStep(): PlanStep {
   return { type: "STOP" };
 }
 
-function buildMotionSteps(parsed: ParsedInstruction, caps: Capabilities): PlanStep[] {
+function validateCanonicalActionSchema(parsed: ParsedInstruction): void {
+  if (!parsed.canonical_actions) {
+    return;
+  }
+  for (const [index, action] of parsed.canonical_actions.entries()) {
+    if (!action || typeof action !== "object" || !("type" in action)) {
+      throw new Error(`canonical_actions[${index}] must be an object with type`);
+    }
+    if (action.type === "MOVE") {
+      if (!["forward", "backward", "left", "right"].includes(action.direction)) {
+        throw new Error(`canonical_actions[${index}] MOVE.direction invalid: ${String(action.direction)}`);
+      }
+      if (action.distance_m !== undefined && (!(typeof action.distance_m === "number") || !Number.isFinite(action.distance_m))) {
+        throw new Error(`canonical_actions[${index}] MOVE.distance_m must be numeric`);
+      }
+      continue;
+    }
+    if (action.type === "TURN") {
+      if (!["left", "right"].includes(action.direction)) {
+        throw new Error(`canonical_actions[${index}] TURN.direction invalid: ${String(action.direction)}`);
+      }
+      if (action.angle_deg !== undefined && (!(typeof action.angle_deg === "number") || !Number.isFinite(action.angle_deg))) {
+        throw new Error(`canonical_actions[${index}] TURN.angle_deg must be numeric`);
+      }
+      continue;
+    }
+    if (action.type !== "STOP") {
+      throw new Error(`canonical_actions[${index}] unsupported type: ${String((action as { type?: unknown }).type)}`);
+    }
+  }
+}
+
+function uppercaseTokenSet(allowedTokenMap: Map<string, Set<string>> | null, target: string): Set<string> {
+  const out = new Set<string>();
+  const existing = allowedTokenMap?.get(target);
+  if (!existing) {
+    return out;
+  }
+  for (const token of existing) {
+    out.add(token.toUpperCase());
+  }
+  return out;
+}
+
+function buildMotionSteps(
+  parsed: ParsedInstruction,
+  caps: Capabilities,
+  allowedTokenMap: Map<string, Set<string>> | null
+): { steps: PlanStep[]; mapping_notes: string[] } {
   const steps: PlanStep[] = [];
+  const mapping_notes: string[] = [];
+  const baseTokens = uppercaseTokenSet(allowedTokenMap, caps.base_target);
+  const tokenAvailable = (token: string) => !allowedTokenMap || baseTokens.has(token.toUpperCase());
   const count = clamp(parsed.count || 1, 1, 10);
 
   if (parsed.pattern === "circle") {
@@ -1250,7 +1325,7 @@ function buildMotionSteps(parsed: ParsedInstruction, caps: Capabilities): PlanSt
         steps.push(runStep(caps.base_target, caps.base_turn_token, [90], 260));
       }
     }
-    return steps;
+    return { steps, mapping_notes };
   }
 
   if (parsed.pattern === "square") {
@@ -1260,7 +1335,7 @@ function buildMotionSteps(parsed: ParsedInstruction, caps: Capabilities): PlanSt
         steps.push(runStep(caps.base_target, caps.base_turn_token, [90], 280));
       }
     }
-    return steps;
+    return { steps, mapping_notes };
   }
 
   if (parsed.pattern === "triangle") {
@@ -1270,17 +1345,83 @@ function buildMotionSteps(parsed: ParsedInstruction, caps: Capabilities): PlanSt
         steps.push(runStep(caps.base_target, caps.base_turn_token, [120], 300));
       }
     }
-    return steps;
+    return { steps, mapping_notes };
   }
 
-  const distance = clamp(parsed.distance_m || 1, 0.1, 10);
-  const duration = clamp(Math.round(distance * 1800), 250, 8000);
-  if (parsed.pattern === "backward") {
-    steps.push(runStep(caps.base_target, "BWD", [0.55], duration));
-    return steps;
+  const actions = parsed.canonical_actions ?? [
+    {
+      type: "MOVE",
+      direction: "forward",
+      distance_m: clamp(parsed.distance_m || 1, 0.1, 10),
+      speed: 0.55
+    } as CanonicalAction
+  ];
+
+  for (const action of actions) {
+    if (action.type === "STOP") {
+      steps.push(stopStep());
+      continue;
+    }
+
+    if (action.type === "TURN") {
+      const angle = clamp(Math.abs(action.angle_deg ?? 90), 1, 180);
+      const signed = action.direction === "left" ? -angle : angle;
+      if (tokenAvailable(caps.base_turn_token)) {
+        steps.push(runStep(caps.base_target, caps.base_turn_token, [signed], 360));
+        mapping_notes.push(`TURN(${action.direction},${angle}) -> ${caps.base_turn_token}`);
+      } else if (tokenAvailable("MECANUM")) {
+        const cmd = action.direction === "left" ? "Q" : "E";
+        steps.push(runStep(caps.base_target, "MECANUM", [cmd], 360));
+        mapping_notes.push(`TURN(${action.direction},${angle}) -> MECANUM(${cmd})`);
+      } else {
+        throw new Error(`No manifest token available to map TURN(${action.direction})`);
+      }
+      continue;
+    }
+
+    const distance = clamp(action.distance_m ?? parsed.distance_m ?? 1, 0.1, 10);
+    const speed = clamp(action.speed ?? 0.55, 0.1, 1);
+    const duration = clamp(Math.round(distance * 1800), 250, 8000);
+    if (action.direction === "forward") {
+      if (!tokenAvailable(caps.base_fwd_token)) {
+        throw new Error(`No manifest token available to map MOVE(forward) expected ${caps.base_fwd_token}`);
+      }
+      steps.push(runStep(caps.base_target, caps.base_fwd_token, [speed], duration));
+      mapping_notes.push(`MOVE(forward) -> ${caps.base_fwd_token}`);
+      continue;
+    }
+
+    if (action.direction === "backward") {
+      if (tokenAvailable("BWD")) {
+        steps.push(runStep(caps.base_target, "BWD", [speed], duration));
+        mapping_notes.push("MOVE(backward) -> BWD");
+      } else if (tokenAvailable("MECANUM")) {
+        steps.push(runStep(caps.base_target, "MECANUM", ["B"], duration));
+        mapping_notes.push("MOVE(backward) -> MECANUM(B)");
+      } else {
+        throw new Error("No manifest token available to map MOVE(backward)");
+      }
+      continue;
+    }
+
+    if (action.direction === "left" || action.direction === "right") {
+      const dir = action.direction === "left" ? "L" : "R";
+      if (tokenAvailable(caps.base_strafe_token)) {
+        steps.push(runStep(caps.base_target, caps.base_strafe_token, [dir, speed], duration));
+        mapping_notes.push(`MOVE(${action.direction}) -> ${caps.base_strafe_token}(${dir})`);
+      } else if (tokenAvailable("MECANUM")) {
+        steps.push(runStep(caps.base_target, "MECANUM", [dir], duration));
+        mapping_notes.push(`MOVE(${action.direction}) -> MECANUM(${dir})`);
+      } else if (tokenAvailable(caps.base_turn_token)) {
+        const fallbackTurn = action.direction === "left" ? -90 : 90;
+        steps.push(runStep(caps.base_target, caps.base_turn_token, [fallbackTurn], 360));
+        mapping_notes.push(`MOVE(${action.direction}) fallback -> ${caps.base_turn_token}(${fallbackTurn})`);
+      } else {
+        throw new Error(`No manifest token available to map MOVE(${action.direction})`);
+      }
+    }
   }
-  steps.push(runStep(caps.base_target, caps.base_fwd_token, [0.55], duration));
-  return steps;
+  return { steps, mapping_notes };
 }
 
 function hasObstacleOnPath(objects: PerceivedObject[], selected: PerceivedObject | undefined): boolean {
@@ -1337,7 +1478,12 @@ function signatureMotionScore(previous: number[] | null, current: number[]): num
   return clamp(sum / current.length, 0, 1);
 }
 
-function buildPlanAndState(previous: VisionState, parsed: ParsedInstruction, perception: Perception) {
+function buildPlanAndState(
+  previous: VisionState,
+  parsed: ParsedInstruction,
+  perception: Perception,
+  allowedTokenMap: Map<string, Set<string>> | null
+) {
   const next: VisionState = {
     ...previous,
     capabilities: { ...previous.capabilities },
@@ -1371,7 +1517,8 @@ function buildPlanAndState(previous: VisionState, parsed: ParsedInstruction, per
   if (parsed.task_type === "move-pattern") {
     next.stage = "MOTION_ONLY";
     policyBranch = "MOVE/PATTERN";
-    const steps = buildMotionSteps(parsed, caps);
+    const { steps, mapping_notes } = buildMotionSteps(parsed, caps, allowedTokenMap);
+    notes.push(...mapping_notes);
     next.motion_ctx.total_steps = steps.length;
 
     if (next.motion_ctx.step_idx < steps.length) {
@@ -1667,7 +1814,7 @@ function buildAllowedTokenMap(manifest: unknown): Map<string, Set<string>> | nul
     if (Array.isArray(node.commands)) {
       for (const command of node.commands) {
         if (isObject(command) && typeof command.token === "string") {
-          tokenSet.add(command.token);
+          tokenSet.add(command.token.toUpperCase());
         }
       }
     }
@@ -1679,11 +1826,12 @@ function buildAllowedTokenMap(manifest: unknown): Map<string, Set<string>> | nul
 
 function sanitizePlanToManifest(plan: PlanStep[], allowedTokenMap: Map<string, Set<string>> | null) {
   if (!allowedTokenMap) {
-    return { plan, dropped: 0 };
+    return { plan, dropped: 0, dropped_details: [] as Array<Record<string, unknown>> };
   }
 
   const nextPlan: PlanStep[] = [];
   let dropped = 0;
+  const droppedDetails: Array<Record<string, unknown>> = [];
 
   for (const step of plan) {
     if (step.type === "STOP") {
@@ -1692,10 +1840,15 @@ function sanitizePlanToManifest(plan: PlanStep[], allowedTokenMap: Map<string, S
     }
 
     const tokens = allowedTokenMap.get(step.target);
-    if (tokens && tokens.has(step.token)) {
+    if (tokens && tokens.has(step.token.toUpperCase())) {
       nextPlan.push(step);
     } else {
       dropped += 1;
+      droppedDetails.push({
+        target: step.target,
+        token: step.token,
+        available_tokens: tokens ? Array.from(tokens) : []
+      });
     }
   }
 
@@ -1705,7 +1858,8 @@ function sanitizePlanToManifest(plan: PlanStep[], allowedTokenMap: Map<string, S
 
   return {
     plan: nextPlan,
-    dropped
+    dropped,
+    dropped_details: droppedDetails
   };
 }
 
@@ -1751,6 +1905,10 @@ export async function POST(request: Request) {
 
   const frameBase64 = body.frame_jpeg_base64;
   const instruction = body.instruction;
+  const correlationId =
+    (typeof body.correlation_id === "string" && body.correlation_id.trim()) ||
+    request.headers.get("x-correlation-id") ||
+    generateCorrelationId();
 
   if (typeof frameBase64 !== "string" || frameBase64.length < 20) {
     return NextResponse.json({ error: "BAD_REQUEST", message: "frame_jpeg_base64 is required" }, { status: 400, headers });
@@ -1764,8 +1922,18 @@ export async function POST(request: Request) {
     const totalStart = Date.now();
     const parseStart = Date.now();
     const parsed = parseInstruction(instruction);
+    validateCanonicalActionSchema(parsed);
     const instructionHash = fnv1aHash(normalizeInstruction(instruction));
     const parseMs = Date.now() - parseStart;
+    const allowedTokenMap = buildAllowedTokenMap(body.system_manifest);
+    const allowedBaseTokens = allowedTokenMap?.get("base") ? Array.from(allowedTokenMap.get("base") || []) : [];
+    logVisionTrace("vision_step.parse", correlationId, {
+      instruction: instruction.trim(),
+      parsed_task_type: parsed.task_type,
+      parsed_pattern: parsed.pattern ?? null,
+      parsed_canonical_actions: parsed.canonical_actions ?? null,
+      allowed_base_tokens: allowedBaseTokens
+    });
 
     let state = normalizeState(body.state);
     const notes: string[] = [];
@@ -1798,7 +1966,7 @@ export async function POST(request: Request) {
     notes.push(...perceptionResult.notes);
 
     const policyStart = Date.now();
-    const output = buildPlanAndState(state, parsed, perceptionResult.perception);
+    const output = buildPlanAndState(state, parsed, perceptionResult.perception, allowedTokenMap);
     const policyMs = Date.now() - policyStart;
     output.state.target_lock_ctx = updateTargetLockCtx(state.target_lock_ctx, perceptionResult.perception.selected_target);
 
@@ -1895,15 +2063,28 @@ export async function POST(request: Request) {
       cached_source: perceptionResult.source === "openai_vision" ? "openai_vision" : state.perf_ctx.cached_source
     };
 
-    const allowedTokenMap = buildAllowedTokenMap(body.system_manifest);
     const safePlan = sanitizePlanToManifest(planForValidation, allowedTokenMap);
+    if (safePlan.dropped > 0) {
+      logVisionTrace("vision_step.manifest_drop", correlationId, {
+        dropped_steps: safePlan.dropped,
+        dropped_details: safePlan.dropped_details
+      });
+    }
+    logVisionTrace("vision_step.plan", correlationId, {
+      policy_branch: recoveryBranch,
+      generated_plan: planForValidation,
+      safe_plan: safePlan.plan,
+      dropped_steps: safePlan.dropped
+    });
 
     return NextResponse.json(
       {
+        correlation_id: correlationId,
         state: output.state,
         perception: perceptionResult.perception,
         plan: safePlan.plan,
         debug: {
+          correlation_id: correlationId,
           applied_instruction: instruction.trim(),
           instruction_hash: instructionHash,
           policy_branch: recoveryBranch,
@@ -1963,13 +2144,17 @@ export async function POST(request: Request) {
           ],
           manifest_guard: {
             enabled: Boolean(allowedTokenMap),
-            dropped_steps: safePlan.dropped
+            dropped_steps: safePlan.dropped,
+            dropped_steps_detail: safePlan.dropped_details
           }
         }
       },
       { status: 200, headers }
     );
   } catch (error) {
+    logVisionTrace("vision_step.error", correlationId, {
+      error: error instanceof Error ? error.message : "failed to process frame"
+    });
     return NextResponse.json(
       {
         error: "VISION_ERROR",

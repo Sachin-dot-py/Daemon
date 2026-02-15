@@ -2,6 +2,12 @@ import { ValidationError } from "@/lib/validate";
 import type { MecanumCmd, MecanumPlanRequest, MecanumPlanResponse, MecanumPlanStep } from "@/lib/mecanum_types";
 
 const ALLOWED_CMDS: ReadonlySet<string> = new Set(["F", "B", "L", "R", "Q", "E", "S"]);
+type CanonicalMoveDirection = "forward" | "backward" | "left" | "right";
+type CanonicalTurnDirection = "left" | "right";
+type CanonicalAction =
+  | { type: "MOVE"; direction: CanonicalMoveDirection; distance_m?: number; speed?: number }
+  | { type: "TURN"; direction: CanonicalTurnDirection; angle_deg?: number; speed?: number }
+  | { type: "STOP" };
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -28,6 +34,40 @@ function ensureStop(plan: MecanumPlanStep[]): MecanumPlanStep[] {
   const last = plan[plan.length - 1];
   if (last.cmd === "S") return plan;
   return [...plan, { cmd: "S", duration_ms: 0 }];
+}
+
+function canonicalToMecanumPlan(actions: CanonicalAction[], defaultDurationMs: number, maxSteps: number): MecanumPlanStep[] {
+  const plan: MecanumPlanStep[] = [];
+  const push = (cmd: MecanumCmd, durationMs: number) => {
+    if (plan.length < maxSteps) {
+      plan.push({ cmd, duration_ms: clampInt(durationMs, 0, 10_000) });
+    }
+  };
+
+  for (const action of actions) {
+    if (action.type === "STOP") {
+      push("S", 0);
+      continue;
+    }
+    if (action.type === "TURN") {
+      const cmd: MecanumCmd = action.direction === "left" ? "Q" : "E";
+      const duration = clampInt(Math.max(120, Math.round((Math.abs(action.angle_deg ?? 90) / 90) * defaultDurationMs)), 0, 10_000);
+      push(cmd, duration);
+      continue;
+    }
+
+    const directionMap: Record<CanonicalMoveDirection, MecanumCmd> = {
+      forward: "F",
+      backward: "B",
+      left: "L",
+      right: "R"
+    };
+    const cmd = directionMap[action.direction];
+    const duration = clampInt(Math.max(120, Math.round((action.distance_m ?? 1) * defaultDurationMs)), 0, 10_000);
+    push(cmd, duration);
+  }
+
+  return ensureStop(plan.slice(0, maxSteps));
 }
 
 function fallbackHeuristicPlan(instruction: string, defaultDurationMs: number, maxSteps: number): MecanumPlanResponse {
@@ -57,6 +97,24 @@ function fallbackHeuristicPlan(instruction: string, defaultDurationMs: number, m
 
   if (/\bstop\b/.test(text)) {
     return { explanation: "Stop.", plan: [{ cmd: "S", duration_ms: 0 }] };
+  }
+  if (/\b(turn|rotate)\s+left\b|\bcounterclockwise\b/.test(text)) {
+    return { explanation: "Turn left, then stop.", plan: ensureStop([{ cmd: "Q", duration_ms: defaultDurationMs }]) };
+  }
+  if (/\b(turn|rotate)\s+right\b|\bclockwise\b/.test(text)) {
+    return { explanation: "Turn right, then stop.", plan: ensureStop([{ cmd: "E", duration_ms: defaultDurationMs }]) };
+  }
+  if (/\b(backward|back up|reverse|go back|move back)\b/.test(text)) {
+    return { explanation: "Move backward, then stop.", plan: ensureStop([{ cmd: "B", duration_ms: defaultDurationMs }]) };
+  }
+  if (/\b(left|strafe left|slide left)\b/.test(text)) {
+    return { explanation: "Move left, then stop.", plan: ensureStop([{ cmd: "L", duration_ms: defaultDurationMs }]) };
+  }
+  if (/\b(right|strafe right|slide right)\b/.test(text)) {
+    return { explanation: "Move right, then stop.", plan: ensureStop([{ cmd: "R", duration_ms: defaultDurationMs }]) };
+  }
+  if (/\b(forward|go forward|move forward)\b/.test(text)) {
+    return { explanation: "Move forward, then stop.", plan: ensureStop([{ cmd: "F", duration_ms: defaultDurationMs }]) };
   }
 
   throw new ValidationError("No supported mecanum action found in instruction.");
@@ -93,11 +151,14 @@ export async function createMecanumPlan(request: MecanumPlanRequest): Promise<Me
           role: "system",
           content: [
             "You are a motion planner for a mecanum robot controlled by primitive commands.",
-            "Available commands (one letter):",
-            "F=forward, B=backward, L=strafe left, R=strafe right, Q=rotate left, E=rotate right, S=stop.",
             "You must output ONLY valid JSON.",
-            "Output format: {\"explanation\": string, \"plan\": [{\"cmd\": \"F|B|L|R|Q|E|S\", \"duration_ms\": number}, ...]}",
-            `Constraints: duration_ms is 0..10000. Keep plan length <= ${maxSteps}. Always end with cmd \"S\".`,
+            "Output format: {\"explanation\": string, \"canonical_actions\": [{\"type\":\"MOVE|TURN|STOP\", ...}], \"max_steps\": number}",
+            "Canonical actions schema:",
+            "MOVE(direction: forward|backward|left|right, distance_m?: number, speed?: number)",
+            "TURN(direction: left|right, angle_deg?: number, speed?: number)",
+            "STOP()",
+            `Constraints: keep canonical_actions length <= ${maxSteps}.`,
+            "Map semantic variants to canonical directions (e.g., strafe left/go to your left => MOVE left; reverse/back up => MOVE backward).",
             "For shapes like a circle: approximate using small repeated segments (e.g. forward+rotate) rather than one long move."
           ].join("\n")
         },
@@ -133,14 +194,40 @@ export async function createMecanumPlan(request: MecanumPlanRequest): Promise<Me
     return fallbackHeuristicPlan(instruction, defaultDurationMs, maxSteps);
   }
 
-  if (!isObject(parsed) || !Array.isArray(parsed.plan)) {
+  if (!isObject(parsed) || !Array.isArray(parsed.canonical_actions)) {
     return fallbackHeuristicPlan(instruction, defaultDurationMs, maxSteps);
   }
 
   const explanation = typeof parsed.explanation === "string" && parsed.explanation.trim() ? parsed.explanation.trim() : "Planned motion.";
-  const steps = parsed.plan.map(normalizeStep).filter(Boolean) as MecanumPlanStep[];
-  const trimmed = steps.slice(0, maxSteps);
-  const plan = ensureStop(trimmed);
+  const canonicalActions = parsed.canonical_actions
+    .map((action): CanonicalAction | null => {
+      if (!isObject(action) || typeof action.type !== "string") return null;
+      if (action.type === "STOP") return { type: "STOP" };
+      if (action.type === "MOVE") {
+        const direction = typeof action.direction === "string" ? action.direction : "";
+        if (!["forward", "backward", "left", "right"].includes(direction)) return null;
+        return {
+          type: "MOVE",
+          direction: direction as CanonicalMoveDirection,
+          ...(typeof action.distance_m === "number" ? { distance_m: action.distance_m } : {}),
+          ...(typeof action.speed === "number" ? { speed: action.speed } : {})
+        };
+      }
+      if (action.type === "TURN") {
+        const direction = typeof action.direction === "string" ? action.direction : "";
+        if (!["left", "right"].includes(direction)) return null;
+        return {
+          type: "TURN",
+          direction: direction as CanonicalTurnDirection,
+          ...(typeof action.angle_deg === "number" ? { angle_deg: action.angle_deg } : {}),
+          ...(typeof action.speed === "number" ? { speed: action.speed } : {})
+        };
+      }
+      return null;
+    })
+    .filter(Boolean) as CanonicalAction[];
+
+  const plan = canonicalToMecanumPlan(canonicalActions.slice(0, maxSteps), defaultDurationMs, maxSteps);
 
   if (plan.length === 0) {
     return fallbackHeuristicPlan(instruction, defaultDurationMs, maxSteps);
@@ -148,4 +235,3 @@ export async function createMecanumPlan(request: MecanumPlanRequest): Promise<Me
 
   return { explanation, plan };
 }
-

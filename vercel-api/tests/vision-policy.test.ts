@@ -36,10 +36,18 @@ run("parseInstruction move-pattern circle 3", () => {
   assert.equal(parsed.count, 3);
 });
 
-run("parseInstruction move-pattern backward", () => {
+run("parseInstruction canonical MOVE backward", () => {
   const parsed = parseInstruction("move backward 1 meter");
   assert.equal(parsed.task_type, "move-pattern");
-  assert.equal(parsed.pattern, "backward");
+  assert.equal(parsed.canonical_actions?.[0]?.type, "MOVE");
+  assert.equal((parsed.canonical_actions?.[0] as any)?.direction, "backward");
+});
+
+run("parseInstruction canonical MOVE strafe synonyms", () => {
+  const parsed = parseInstruction("slide right 2 meters");
+  assert.equal(parsed.task_type, "move-pattern");
+  assert.equal(parsed.canonical_actions?.[0]?.type, "MOVE");
+  assert.equal((parsed.canonical_actions?.[0] as any)?.direction, "right");
 });
 
 run("parseInstruction pick-object phone", () => {

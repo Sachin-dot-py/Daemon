@@ -1,6 +1,14 @@
 export type TaskType = "stop" | "move-pattern" | "pick-object" | "follow" | "search" | "avoid+approach" | "unknown";
 
-export type MotionPattern = "circle" | "square" | "triangle" | "forward" | "backward";
+export type MotionPattern = "circle" | "square" | "triangle";
+
+export type CanonicalMoveDirection = "forward" | "backward" | "left" | "right";
+export type CanonicalTurnDirection = "left" | "right";
+
+export type CanonicalAction =
+  | { type: "MOVE"; direction: CanonicalMoveDirection; distance_m?: number; speed?: number }
+  | { type: "TURN"; direction: CanonicalTurnDirection; angle_deg?: number; speed?: number }
+  | { type: "STOP" };
 
 export interface TargetSpec {
   query: string | null;
@@ -13,6 +21,7 @@ export interface ParsedInstruction {
   stop_kind?: "normal" | "emergency";
   target: TargetSpec;
   pattern?: MotionPattern;
+  canonical_actions?: CanonicalAction[];
   count?: number;
   distance_m?: number;
 }
@@ -202,11 +211,12 @@ export function parseInstruction(instruction: string): ParsedInstruction {
     return {
       task_type: "stop",
       stop_kind: /(emergency stop|e-stop|estop|abort)/.test(text) ? "emergency" : "normal",
-      target
+      target,
+      canonical_actions: [{ type: "STOP" }]
     };
   }
 
-  if (/circle|square|triangle|move forward|go forward|move backward|go backward|move back|go back|reverse/.test(text)) {
+  if (/circle|square|triangle/.test(text)) {
     if (/circle/.test(text)) {
       return { task_type: "move-pattern", pattern: "circle", count: parseCount(text), target };
     }
@@ -216,10 +226,65 @@ export function parseInstruction(instruction: string): ParsedInstruction {
     if (/triangle/.test(text)) {
       return { task_type: "move-pattern", pattern: "triangle", count: parseCount(text), target };
     }
+  }
+
+  if (
+    /\b(?:move|go|drive|head|strafe|slide|shift)\s+(?:to\s+)?(?:the\s+)?(?:left|right|forward|backward|backwards|back)\b/.test(text) ||
+    /\b(?:reverse|back up)\b/.test(text) ||
+    /\bturn\s+(?:to\s+)?(?:the\s+)?(?:left|right)\b/.test(text) ||
+    /\brotate\s+(?:left|right|clockwise|counterclockwise)\b/.test(text)
+  ) {
+    const distance = parseDistanceMeters(text) ?? 1;
+    const speed = 0.55;
+
+    if (/\bturn\s+(?:to\s+)?(?:the\s+)?left\b|\brotate\s+left\b|\bcounterclockwise\b/.test(text)) {
+      return {
+        task_type: "move-pattern",
+        canonical_actions: [{ type: "TURN", direction: "left", angle_deg: 90, speed }],
+        count: 1,
+        target
+      };
+    }
+    if (/\bturn\s+(?:to\s+)?(?:the\s+)?right\b|\brotate\s+right\b|\bclockwise\b/.test(text)) {
+      return {
+        task_type: "move-pattern",
+        canonical_actions: [{ type: "TURN", direction: "right", angle_deg: 90, speed }],
+        count: 1,
+        target
+      };
+    }
+    if (/\b(?:left|strafe left|slide left|go to your left)\b/.test(text)) {
+      return {
+        task_type: "move-pattern",
+        canonical_actions: [{ type: "MOVE", direction: "left", distance_m: distance, speed }],
+        distance_m: distance,
+        count: 1,
+        target
+      };
+    }
+    if (/\b(?:right|strafe right|slide right|go to your right)\b/.test(text)) {
+      return {
+        task_type: "move-pattern",
+        canonical_actions: [{ type: "MOVE", direction: "right", distance_m: distance, speed }],
+        distance_m: distance,
+        count: 1,
+        target
+      };
+    }
+    if (/\b(?:backward|backwards|back up|move back|go back|reverse)\b/.test(text)) {
+      return {
+        task_type: "move-pattern",
+        canonical_actions: [{ type: "MOVE", direction: "backward", distance_m: distance, speed }],
+        distance_m: distance,
+        count: 1,
+        target
+      };
+    }
+
     return {
       task_type: "move-pattern",
-      pattern: /(move backward|go backward|move back|go back|reverse)\b/.test(text) ? "backward" : "forward",
-      distance_m: parseDistanceMeters(text) ?? 1,
+      canonical_actions: [{ type: "MOVE", direction: "forward", distance_m: distance, speed }],
+      distance_m: distance,
       count: 1,
       target
     };

@@ -94,19 +94,39 @@ function parseBody(body: unknown): PlanRequest {
 
 export async function handlePlanRequest(request: Request): Promise<NextResponse> {
   let body: unknown;
+  let correlationId = request.headers.get("x-correlation-id") || `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   try {
     body = await request.json();
   } catch (error) {
     return badRequest("Invalid JSON body.", { cause: (error as Error).message });
   }
+  if (isObject(body) && typeof body.correlation_id === "string" && body.correlation_id.trim()) {
+    correlationId = body.correlation_id.trim();
+  }
 
   try {
     const parsed = parseBody(body);
     const response = createPlan(parsed.instruction, parsed.system_manifest);
+    console.log(
+      JSON.stringify({
+        event: "planner.plan.ok",
+        correlation_id: correlationId,
+        instruction: parsed.instruction,
+        plan: response.plan
+      })
+    );
     return NextResponse.json(response, { status: 200 });
   } catch (error) {
     if (error instanceof ValidationError || error instanceof PlannerError) {
+      console.log(
+        JSON.stringify({
+          event: "planner.plan.error",
+          correlation_id: correlationId,
+          message: error.message,
+          details: error.details ?? null
+        })
+      );
       return NextResponse.json(
         {
           error: error.code,

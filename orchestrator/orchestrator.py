@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +32,21 @@ class NodeInfo:
     telemetry_snapshot: dict[str, str] = field(default_factory=dict)
     telemetry_subscribed: bool = False
     read_buffer: bytearray = field(default_factory=bytearray)
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + f".{int((time.time() % 1) * 1000):03d}Z"
+
+
+def _log_event(event: str, correlation_id: str | None = None, **fields: Any) -> None:
+    payload: dict[str, Any] = {
+        "ts": _now_iso(),
+        "event": event,
+    }
+    if correlation_id:
+        payload["correlation_id"] = correlation_id
+    payload.update(fields)
+    print(json.dumps(payload), flush=True)
 
 
 class Orchestrator:
@@ -200,11 +216,12 @@ class Orchestrator:
             except OSError:
                 pass
 
-    def _request(self, node: NodeInfo, line: str, timeout: float | None = None) -> str:
+    def _request(self, node: NodeInfo, line: str, timeout: float | None = None, correlation_id: str | None = None) -> str:
         if node.sock is None:
             raise RuntimeError(f"{node.alias}: not connected")
 
         wait = self.timeout_s if timeout is None else timeout
+        _log_event("transport.tx", correlation_id, node=node.alias, line=line, timeout_s=wait)
         with node.request_lock:
             try:
                 with node.write_lock:
@@ -221,10 +238,13 @@ class Orchestrator:
 
             if self.enable_telemetry:
                 try:
-                    return node.rx_queue.get(timeout=wait)
+                    response = node.rx_queue.get(timeout=wait)
                 except queue.Empty as exc:
                     raise RuntimeError(f"{node.alias}: timeout waiting for response to '{line}'") from exc
-            return self._readline_direct(node, wait)
+            else:
+                response = self._readline_direct(node, wait)
+        _log_event("transport.rx", correlation_id, node=node.alias, line=line, response=response)
+        return response
 
     def _build_catalogs(self) -> None:
         first_owner: dict[str, NodeInfo] = {}
@@ -343,9 +363,10 @@ class Orchestrator:
             if max_value is not None and numeric_value > float(max_value):
                 raise RuntimeError(f"{context}: value {numeric_value} > max {max_value}")
 
-    def validate_plan(self, plan: list[dict[str, Any]]) -> None:
+    def validate_plan(self, plan: list[dict[str, Any]], correlation_id: str | None = None) -> None:
         if not isinstance(plan, list):
             raise RuntimeError("plan must be a list")
+        _log_event("orchestrator.validate_plan.start", correlation_id, plan_len=len(plan))
 
         for index, step in enumerate(plan):
             if not isinstance(step, dict):
@@ -409,6 +430,7 @@ class Orchestrator:
                 if duration < 0:
                     raise RuntimeError(f"step[{index}] duration_ms must be >= 0")
                 step["duration_ms"] = duration
+        _log_event("orchestrator.validate_plan.ok", correlation_id, plan_len=len(plan))
 
     def resolve_node(self, target: str | None, token: str) -> NodeInfo:
         token_u = token.upper()
@@ -437,10 +459,11 @@ class Orchestrator:
             raise RuntimeError(f"Ambiguous token '{token_u}', use namespaced token or target")
         raise RuntimeError(f"Token '{token_u}' not found")
 
-    def run_step(self, step: dict[str, Any]) -> None:
+    def run_step(self, step: dict[str, Any], correlation_id: str | None = None) -> None:
         step_type = str(step.get("type", "")).upper()
         if step_type == "STOP":
-            self.emergency_stop()
+            _log_event("orchestrator.run_step.stop", correlation_id)
+            self.emergency_stop(correlation_id=correlation_id)
             return
 
         if step_type != "RUN":
@@ -452,41 +475,55 @@ class Orchestrator:
         duration_ms = step.get("duration_ms")
 
         node = self.resolve_node(target, token)
+        _log_event(
+            "orchestrator.run_step.start",
+            correlation_id,
+            target=target,
+            resolved_node=node.alias,
+            token=token,
+            args=args,
+            duration_ms=duration_ms,
+        )
 
         wire = ["RUN", token] + [str(arg) for arg in args]
-        response = self._request(node, " ".join(wire), timeout=self.step_timeout_s)
+        response = self._request(node, " ".join(wire), timeout=self.step_timeout_s, correlation_id=correlation_id)
         if response != "OK":
             raise RuntimeError(f"{node.alias}: RUN failed -> {response}")
 
         if duration_ms is not None:
             delay = max(0.0, float(duration_ms) / 1000.0)
             time.sleep(delay)
-            stop_resp = self._request(node, "STOP", timeout=self.step_timeout_s)
+            stop_resp = self._request(node, "STOP", timeout=self.step_timeout_s, correlation_id=correlation_id)
             if stop_resp != "OK":
                 raise RuntimeError(f"{node.alias}: STOP after duration failed -> {stop_resp}")
+        _log_event("orchestrator.run_step.ok", correlation_id, token=token, node=node.alias)
 
-    def execute_plan(self, plan: list[dict[str, Any]]) -> None:
+    def execute_plan(self, plan: list[dict[str, Any]], correlation_id: str | None = None) -> None:
+        _log_event("orchestrator.execute_plan.start", correlation_id, plan_len=len(plan))
         for index, step in enumerate(plan):
             try:
-                self.run_step(step)
+                self.run_step(step, correlation_id=correlation_id)
             except Exception as exc:
                 try:
-                    self.emergency_stop()
+                    self.emergency_stop(correlation_id=correlation_id)
                 except Exception as stop_exc:
                     raise RuntimeError(f"step[{index}] failed: {exc}; panic STOP failed: {stop_exc}") from exc
                 raise RuntimeError(f"step[{index}] failed: {exc}; panic STOP sent") from exc
+        _log_event("orchestrator.execute_plan.ok", correlation_id, plan_len=len(plan))
 
-    def emergency_stop(self) -> None:
+    def emergency_stop(self, correlation_id: str | None = None) -> None:
+        _log_event("orchestrator.emergency_stop.start", correlation_id)
         for node in self.nodes:
             try:
                 if node.sock is None:
                     print(f"stop warning [{node.alias}]: socket not connected")
                     continue
-                response = self._request(node, "STOP", timeout=0.8)
+                response = self._request(node, "STOP", timeout=0.8, correlation_id=correlation_id)
                 if response != "OK":
                     print(f"stop warning [{node.alias}]: {response}")
             except Exception as exc:
                 print(f"stop warning [{node.alias}]: {exc}")
+        _log_event("orchestrator.emergency_stop.ok", correlation_id)
 
 
 def parse_node_arg(raw: str) -> NodeInfo:
@@ -503,19 +540,29 @@ def parse_node_arg(raw: str) -> NodeInfo:
     return NodeInfo(alias=alias, host=host, port=port)
 
 
-def call_remote_planner(planner_url: str, instruction: str, system_manifest: dict, telemetry_snapshot: dict) -> dict:
+def call_remote_planner(
+    planner_url: str,
+    instruction: str,
+    system_manifest: dict,
+    telemetry_snapshot: dict,
+    correlation_id: str | None = None,
+) -> dict:
     payload = json.dumps(
         {
             "instruction": instruction,
             "system_manifest": system_manifest,
             "telemetry_snapshot": telemetry_snapshot,
+            "correlation_id": correlation_id,
         }
     ).encode("utf-8")
 
     request = urllib.request.Request(
         planner_url,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            **({"X-Correlation-Id": correlation_id} if correlation_id else {}),
+        },
         method="POST",
     )
 
@@ -591,6 +638,7 @@ def make_plan(
     instruction: str,
     orchestrator: Orchestrator,
     planner_url: str | None,
+    correlation_id: str | None = None,
 ) -> dict[str, Any]:
     if planner_url:
         try:
@@ -599,6 +647,7 @@ def make_plan(
                 instruction,
                 orchestrator.merged_manifest(),
                 orchestrator.telemetry_snapshot(),
+                correlation_id=correlation_id,
             )
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
             print(f"planner fallback: {exc}")
@@ -606,12 +655,12 @@ def make_plan(
             remote_plan = remote.get("plan")
             if not isinstance(remote_plan, list):
                 raise RuntimeError("Planner response missing valid plan[]")
-            orchestrator.validate_plan(remote_plan)
+            orchestrator.validate_plan(remote_plan, correlation_id=correlation_id)
             return remote
 
     local = fallback_plan(instruction)
     local_plan = local.get("plan", [])
-    orchestrator.validate_plan(local_plan)
+    orchestrator.validate_plan(local_plan, correlation_id=correlation_id)
     return local
 
 
@@ -670,9 +719,11 @@ def run_http_bridge(orchestrator: Orchestrator, host: str, port: int) -> None:
 
         def do_POST(self) -> None:  # noqa: N802
             if self.path == "/stop":
+                correlation_id = self.headers.get("X-Correlation-Id") or f"orch-{uuid.uuid4().hex[:12]}"
+                _log_event("http.stop.request", correlation_id)
                 with execution_lock:
-                    orchestrator.emergency_stop()
-                self._write_json(200, {"ok": True})
+                    orchestrator.emergency_stop(correlation_id=correlation_id)
+                self._write_json(200, {"ok": True, "correlation_id": correlation_id})
                 return
 
             if self.path == "/execute_plan":
@@ -681,15 +732,29 @@ def run_http_bridge(orchestrator: Orchestrator, host: str, port: int) -> None:
                     plan = body.get("plan")
                     if not isinstance(plan, list):
                         raise RuntimeError("plan must be a list")
+                    correlation_id = (
+                        (body.get("correlation_id") if isinstance(body.get("correlation_id"), str) else None)
+                        or self.headers.get("X-Correlation-Id")
+                        or f"orch-{uuid.uuid4().hex[:12]}"
+                    )
+                    _log_event("http.execute_plan.request", correlation_id, plan_len=len(plan), plan=plan)
 
                     with execution_lock:
-                        orchestrator.validate_plan(plan)
-                        orchestrator.execute_plan(plan)
+                        orchestrator.validate_plan(plan, correlation_id=correlation_id)
+                        orchestrator.execute_plan(plan, correlation_id=correlation_id)
                 except Exception as exc:
-                    self._write_json(400, {"ok": False, "error": str(exc)})
+                    _log_event("http.execute_plan.error", correlation_id if "correlation_id" in locals() else None, error=str(exc))
+                    self._write_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": str(exc),
+                            **({"correlation_id": correlation_id} if "correlation_id" in locals() else {}),
+                        },
+                    )
                     return
 
-                self._write_json(200, {"ok": True})
+                self._write_json(200, {"ok": True, "correlation_id": correlation_id})
                 return
 
             self._write_json(404, {"ok": False, "error": "not_found"})
@@ -731,13 +796,14 @@ def repl(orchestrator: Orchestrator, planner_url: str | None) -> None:
             print("global stop sent")
             continue
 
-        planned = make_plan(line, orchestrator, planner_url)
+        correlation_id = f"repl-{uuid.uuid4().hex[:12]}"
+        planned = make_plan(line, orchestrator, planner_url, correlation_id=correlation_id)
         plan = planned.get("plan", [])
         print(json.dumps(planned, indent=2))
 
         try:
-            orchestrator.validate_plan(plan)
-            orchestrator.execute_plan(plan)
+            orchestrator.validate_plan(plan, correlation_id=correlation_id)
+            orchestrator.execute_plan(plan, correlation_id=correlation_id)
             print("plan executed")
         except Exception as exc:
             print(f"execution error: {exc}")
@@ -767,11 +833,12 @@ def main() -> None:
         if args.http_port is not None:
             run_http_bridge(orchestrator, args.http_host, args.http_port)
         elif args.instruction:
-            planned = make_plan(args.instruction, orchestrator, args.planner_url)
+            correlation_id = f"cli-{uuid.uuid4().hex[:12]}"
+            planned = make_plan(args.instruction, orchestrator, args.planner_url, correlation_id=correlation_id)
             plan = planned.get("plan", [])
             print(json.dumps(planned, indent=2))
-            orchestrator.validate_plan(plan)
-            orchestrator.execute_plan(plan)
+            orchestrator.validate_plan(plan, correlation_id=correlation_id)
+            orchestrator.execute_plan(plan, correlation_id=correlation_id)
             print("plan executed")
         else:
             repl(orchestrator, args.planner_url)
