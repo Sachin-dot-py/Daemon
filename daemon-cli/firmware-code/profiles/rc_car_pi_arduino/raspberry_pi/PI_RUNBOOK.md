@@ -41,6 +41,7 @@ dmesg | egrep -i 'cdc_acm|ttyACM|Arduino|error -32|enumerate' | tail -n 60
 ```
 
 If `/dev/ttyACM0` is missing, fix USB/power/wiring first.
+Note: after reconnects it may show up as `/dev/ttyACM1`. Prefer the stable `/dev/serial/by-id/...` symlink.
 
 ## 4) Start The DAEMON Node Server
 
@@ -51,7 +52,7 @@ Important: port conflicts
 ```bash
 pkill -f mecanum_daemon_node.py || true
 nohup python3 daemon-cli/firmware-code/profiles/rc_car_pi_arduino/raspberry_pi/mecanum_daemon_node.py \
-  --serial /dev/ttyACM0 --baud 9600 --port 8766 --node-id base \
+  --serial /dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_44238313039351317291-if00 --baud 9600 --port 8766 --node-id base \
   > ~/mecanum_node.log 2>&1 &
 ```
 
@@ -71,7 +72,7 @@ pkill -f mecanum_daemon_node.py || true
 Start node on `8765`:
 ```bash
 nohup python3 daemon-cli/firmware-code/profiles/rc_car_pi_arduino/raspberry_pi/mecanum_daemon_node.py \
-  --serial /dev/ttyACM0 --baud 9600 --port 8765 --node-id base \
+  --serial /dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_44238313039351317291-if00 --baud 9600 --port 8765 --node-id base \
   > ~/mecanum_node.log 2>&1 &
 ```
 
@@ -160,5 +161,5 @@ Then the desktop app can execute plans via `http://127.0.0.1:5055/execute_plan`.
 - If the Pi ethernet drops, reconnect it and re-run:
   - `ss -ltnp | egrep ':(8765|8766)\\b'`
   - `tail -n 60 ~/mecanum_node.log`
-- If the node returns `ERR SERIAL ... No such file or directory: '/dev/ttyACM0'`, the Arduino disappeared.
+- If the node returns `ERR SERIAL ... No such file or directory: '/dev/ttyACM0'`, the Arduino disappeared (or moved to `/dev/ttyACM1`).
 - If your laptop healthcheck gets JSON like `{"ok": false, ...}` back, you're still hitting the *old* JSON bridge, not the DAEMON node.

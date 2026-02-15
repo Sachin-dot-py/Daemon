@@ -7,7 +7,9 @@ Wants=network-online.target
 Type=simple
 User=treehacks
 WorkingDirectory=/home/treehacks/Daemon
-ExecStart=/usr/bin/python3 /home/treehacks/Daemon/daemon-cli/firmware-code/profiles/rc_car_pi_arduino/raspberry_pi/mecanum_daemon_node.py --serial /dev/ttyACM0 --baud 9600 --port 8766 --node-id base
+# Prefer a stable udev symlink over /dev/ttyACM0 which can change to ttyACM1 after reconnect.
+# Find yours via: ls -l /dev/serial/by-id
+ExecStart=/usr/bin/python3 /home/treehacks/Daemon/daemon-cli/firmware-code/profiles/rc_car_pi_arduino/raspberry_pi/mecanum_daemon_node.py --serial /dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_44238313039351317291-if00 --baud 9600 --port 8766 --node-id base
 Restart=always
 RestartSec=1
 StandardOutput=append:/home/treehacks/mecanum_node.log
@@ -15,4 +17,3 @@ StandardError=append:/home/treehacks/mecanum_node.log
 
 [Install]
 WantedBy=multi-user.target
-
