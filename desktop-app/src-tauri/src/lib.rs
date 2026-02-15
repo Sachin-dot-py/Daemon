@@ -113,7 +113,7 @@ fn stop_orchestrator_locked(slot: &mut Option<OrchestratorProcess>) {
 fn normalize_base_url(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.is_empty() {
-        return Err("orchestrator_base_url is empty".to_string());
+        return Err("base_url is empty".to_string());
     }
     Ok(trimmed.to_string())
 }
@@ -412,6 +412,82 @@ async fn orchestrator_request(
     })
 }
 
+async fn vision_request(
+    method: reqwest::Method,
+    vision_base_url: String,
+    path: &str,
+    body: Option<Value>,
+    correlation_id: Option<String>,
+) -> Result<Value, String> {
+    let base = normalize_base_url(&vision_base_url)?;
+    let url = format!("{base}{path}");
+    let client = reqwest::Client::new();
+    let request_body = body.clone();
+
+    let request = client.request(method.clone(), &url);
+    let request = if let Some(cid) = correlation_id.as_ref() {
+        request.header("X-Correlation-Id", cid)
+    } else {
+        request
+    };
+    let request = if let Some(payload) = body {
+        request.json(&payload)
+    } else {
+        request
+    };
+
+    append_desktop_audit_log(
+        "vision.request",
+        &json!({
+            "method": method.to_string(),
+            "url": url.clone(),
+            "body": request_body,
+            "correlation_id": correlation_id
+        }),
+    );
+
+    let response = request.send().await.map_err(|error| {
+        let msg = format!("{method} {url} failed: network error: {error}");
+        append_desktop_audit_log(
+            "vision.network_error",
+            &json!({
+                "method": method.to_string(),
+                "url": url.clone(),
+                "error": msg
+            }),
+        );
+        msg
+    })?;
+
+    let status = response.status();
+    let response_text = response
+        .text()
+        .await
+        .map_err(|error| format!("{method} {url} failed: could not read response body: {error}"))?;
+
+    append_desktop_audit_log(
+        "vision.response",
+        &json!({
+            "method": method.to_string(),
+            "url": url.clone(),
+            "status": status.as_u16(),
+            "body": trunc_for_log(&response_text, 8000)
+        }),
+    );
+
+    if !status.is_success() {
+        return Err(format!(
+            "{method} {url} failed: HTTP {} body={}",
+            status.as_u16(),
+            trunc_for_log(&response_text, 3000),
+        ));
+    }
+
+    serde_json::from_str::<Value>(&response_text).map_err(|error| {
+        format!("{method} {url} failed: invalid JSON response: {error}; body={response_text}")
+    })
+}
+
 #[tauri::command]
 fn read_desktop_audit_log(tail_lines: Option<usize>) -> Result<String, String> {
     let path = repo_logs_dir()?.join("backend_audit.jsonl");
@@ -586,6 +662,22 @@ async fn orchestrator_stop(orchestrator_base_url: String) -> Result<Value, Strin
         "/stop",
         Some(json!({})),
         None,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn vision_step(
+    vision_base_url: String,
+    payload: Value,
+    correlation_id: Option<String>,
+) -> Result<Value, String> {
+    vision_request(
+        reqwest::Method::POST,
+        vision_base_url,
+        "/api/vision_step",
+        Some(payload),
+        correlation_id,
     )
     .await
 }
@@ -784,6 +876,7 @@ pub fn run() {
             orchestrator_status,
             orchestrator_execute_plan,
             orchestrator_stop,
+            vision_step,
             node_probe,
             write_debug_log,
             read_debug_log,

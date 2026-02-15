@@ -79,18 +79,48 @@ async function captureFrameBase64(video, canvas) {
 }
 
 async function postVisionJson(url, body, correlationId) {
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Correlation-Id": correlationId
-    },
-    body: JSON.stringify(body)
-  });
+  const base = String(url || "").replace(/\/+$/, "");
+  const endpoint = `${base}/api/vision_step`;
 
-  const data = await resp.json().catch(() => ({}));
+  // WKWebView networking (Tauri) can throw `TypeError: Load failed` even when the
+  // endpoint is reachable. Proxy through Rust to make failures debuggable.
+  if (RUNTIME_IS_TAURI) {
+    try {
+      return await invoke("vision_step", {
+        visionBaseUrl: base,
+        payload: body,
+        correlationId
+      });
+    } catch (error) {
+      throw new Error(`Tauri proxy POST ${endpoint} failed: ${String(error)}`);
+    }
+  }
+
+  let resp;
+  try {
+    resp = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Correlation-Id": correlationId
+      },
+      body: JSON.stringify(body)
+    });
+  } catch (error) {
+    throw new Error(`POST ${endpoint} failed: ${String(error)}`);
+  }
+
+  const raw = await resp.text();
+  let data = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    data = {};
+  }
   if (!resp.ok) {
-    throw new Error(data?.error || data?.message || `HTTP ${resp.status}`);
+    const msg = data?.message || data?.error || raw || `HTTP ${resp.status}`;
+    const code = data?.error ? String(data.error) : null;
+    throw new Error(code && data?.message ? `${code}: ${msg}` : msg);
   }
 
   return data;
@@ -700,7 +730,7 @@ function App() {
       });
       setLastSentInstruction(instructionToSend);
 
-      const visionResponse = await postVisionJson(`${VERCEL_BASE_URL}/api/vision_step`, visionPayload, correlationId);
+      const visionResponse = await postVisionJson(VERCEL_BASE_URL, visionPayload, correlationId);
       const nextState = visionResponse?.state || stateRef.current;
       const nextPlan = Array.isArray(visionResponse?.plan) ? visionResponse.plan : [];
       const planCorrelationId = String(visionResponse?.correlation_id || correlationId);
@@ -775,7 +805,7 @@ function App() {
       setLastOrchestratorError(msg);
       setLastActionText("STEP FAILED");
       setLastActionTimestamp(nowStamp());
-      appendTrace("vision.step.error", { error: msg });
+      appendTrace("vision.step.error", { error: msg, visionBaseUrl: VERCEL_BASE_URL });
 
       if (liveEnabled) {
         await stopLoop({ sendStop: true });
