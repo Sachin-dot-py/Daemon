@@ -1366,22 +1366,29 @@ function App() {
 
   return (
     <div className="studio">
-      <div className="hero" style={{ alignItems: "flex-end" }}>
+      <div className="hero hero--compact">
         <div>
           <p className="eyebrow">DAEMON</p>
           <h1>Reinforcement Learning (Physical Robot)</h1>
           <p className="sub">Set a task, then press Start Reinforcement Learning. The system will iterate until the success condition is stable.</p>
         </div>
-        <div className={orchestratorReachable ? "health ok" : "health bad"}>
+        <div className="hero-actions">
+          <label className="toggle toggle--hero">
+            <input type="checkbox" checked={debugMode} onChange={(e) => setDebugMode(Boolean(e.target.checked))} />
+            <span>Debug</span>
+          </label>
+          <div className={orchestratorReachable ? "health ok" : "health bad"}>
           <span className="dot" />
           <span>{orchestratorReachable ? "Robot Connected" : "Robot Disconnected"}</span>
+        </div>
         </div>
       </div>
 
       {!orchestratorReachable ? (
-        <section className="error" style={{ display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            Robot connection lost. Reseat/tighten Ethernet (or USB), wait for link lights, then retry.
+        <section className="banner banner--error">
+          <div className="banner-body">
+            <div className="banner-title">Connection lost</div>
+            <div className="banner-sub">Reseat/tighten Ethernet (or USB), wait for link lights, then retry.</div>
           </div>
           <button className="secondary" onClick={probeNodes} disabled={!RUNTIME_IS_TAURI || hardwareBusy}>
             Retry
@@ -1413,8 +1420,8 @@ function App() {
         </div>
       </section>
 
-      <section className="controls" style={{ justifyContent: "space-between" }}>
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+      <section className="controls controls--main">
+        <div className="controls-left">
           <button
             className={criticEnabled ? "primary active" : "primary"}
             onClick={() => (criticEnabled ? void stopCriticLoop() : void startCriticLoop())}
@@ -1425,10 +1432,6 @@ function App() {
           </button>
           <button className="panic" onClick={handleStop}>STOP</button>
         </div>
-        <label className="toggle">
-          <input type="checkbox" checked={debugMode} onChange={(e) => setDebugMode(Boolean(e.target.checked))} />
-          <span>Debug Mode</span>
-        </label>
       </section>
 
       <main className="grid">
@@ -1449,11 +1452,14 @@ function App() {
           <h2>Reinforcement Learning</h2>
           {criticError ? <div className="error">RL: {criticError}</div> : null}
           {criticDoneText ? (
-            <div className="note" style={{ border: "1px solid rgba(134,239,172,0.45)", background: "rgba(134,239,172,0.08)", padding: 12, borderRadius: 12 }}>
-              <strong>{criticDoneText}</strong>
+            <div className="banner banner--success">
+              <div className="banner-body">
+                <div className="banner-title">Trained</div>
+                <div className="banner-sub">{criticDoneText}</div>
+              </div>
             </div>
           ) : null}
-          <div className="metrics" style={{ marginTop: 10 }}>
+          <div className="metrics metrics--compact">
             <span>running: {String(Boolean(criticEnabled))}</span>
             <span>iterations: {rlIterations.length}</span>
             <span>reward&gt;= {criticRewardTh}</span>
@@ -1461,20 +1467,38 @@ function App() {
             <span>N= {criticSuccessN}</span>
           </div>
 
-          <div style={{ marginTop: 12 }}>
-            <div className="note">Iterations (latest first):</div>
-            <pre style={{ maxHeight: 320, overflow: "auto" }}>
-              {rlIterations.length
-                ? [...rlIterations]
-                    .slice()
-                    .reverse()
-                    .map((it) => {
-                      const tag = it.qualifies ? "SUCCESS" : "FAIL";
-                      return `iter ${it.i}: ${tag}  reward=${it.reward.toFixed(2)} conf=${it.conf.toFixed(2)} motion=${it.motionScore.toFixed(3)}${it.motionGate ? " gated" : ""}`;
-                    })
-                    .join("\n")
-                : "No iterations yet. Click Start Reinforcement Learning."}
-            </pre>
+          <div className="iter-block">
+            <div className="iter-header">
+              <div className="iter-title">Iterations</div>
+              <div className="iter-sub">Newest first</div>
+            </div>
+            <div className="iter-list" role="list">
+              {rlIterations.length ? (
+                [...rlIterations]
+                  .slice()
+                  .reverse()
+                  .map((it) => (
+                    <div key={`${it.i}-${it.ts}`} className={it.qualifies ? "iter-row ok" : "iter-row bad"} role="listitem">
+                      <div className="iter-left">
+                        <div className="iter-index">#{it.i}</div>
+                        <div className={it.qualifies ? "pill pill--ok" : "pill pill--bad"}>{it.qualifies ? "SUCCESS" : "FAIL"}</div>
+                      </div>
+                      <div className="iter-right">
+                        <div className="iter-metrics">
+                          <span>reward {it.reward.toFixed(2)}</span>
+                          <span>conf {it.conf.toFixed(2)}</span>
+                          <span>motion {it.motionScore.toFixed(3)}{it.motionGate ? " gated" : ""}</span>
+                        </div>
+                        {it.failureModes?.length ? (
+                          <div className="iter-notes">{String(it.failureModes.join(", "))}</div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))
+              ) : (
+                <div className="iter-empty">No iterations yet. Click Start Reinforcement Learning.</div>
+              )}
+            </div>
           </div>
 
           {debugMode ? (
