@@ -137,6 +137,30 @@ class Orchestrator:
             f"{','.join(cmd.get('token', '') for cmd in manifest.get('commands', []))}"
         )
 
+    def _reconnect_node(self, node: NodeInfo) -> None:
+        """
+        Best-effort reconnect for flaky links.
+
+        The desktop app/orchestrator can run for long periods while Pi ethernet/USB is flaky.
+        When a node connection drops, we prefer to reconnect and retry the request once rather
+        than failing the whole plan immediately.
+        """
+        node.running = False
+        if node.sock is not None:
+            try:
+                node.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                node.sock.close()
+            except OSError:
+                pass
+        node.sock = None
+        node.rx_queue = queue.Queue()
+        node.read_buffer = bytearray()
+        node.telemetry_subscribed = False
+        self._connect_node(node)
+
     def _readline_direct(self, node: NodeInfo, timeout: float) -> str:
         assert node.sock is not None
         sock = node.sock
@@ -186,7 +210,14 @@ class Orchestrator:
                 with node.write_lock:
                     node.sock.sendall((line + "\n").encode("utf-8"))
             except OSError as exc:
-                raise RuntimeError(f"{node.alias}: socket error sending '{line}': {exc}") from exc
+                # If the peer closed (Broken pipe / reset), reconnect and retry once.
+                try:
+                    self._reconnect_node(node)
+                    assert node.sock is not None
+                    with node.write_lock:
+                        node.sock.sendall((line + "\n").encode("utf-8"))
+                except Exception:
+                    raise RuntimeError(f"{node.alias}: socket error sending '{line}': {exc}") from exc
 
             if self.enable_telemetry:
                 try:
