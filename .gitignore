@@ -60,6 +60,9 @@ desktop-app/src-tauri/target/
 # Local project build outputs
 .build/
 
+# Local runtime caches / metrics
+.daemon/
+
 # Temporary files
 *.tmp
 *.temp

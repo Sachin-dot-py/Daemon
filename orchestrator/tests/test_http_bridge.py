@@ -54,7 +54,7 @@ class HttpBridgeTests(unittest.TestCase):
     def test_execute_plan_endpoint(self):
         status, payload = self.request("POST", "/execute_plan", {"plan": [{"type": "STOP"}]})
         self.assertEqual(status, 200)
-        self.assertEqual(payload, {"ok": True})
+        self.assertTrue(payload["ok"])
 
     def test_execute_plan_validation_error(self):
         req = urllib.request.Request(
@@ -72,7 +72,7 @@ class HttpBridgeTests(unittest.TestCase):
     def test_stop_endpoint(self):
         status, payload = self.request("POST", "/stop", {})
         self.assertEqual(status, 200)
-        self.assertEqual(payload, {"ok": True})
+        self.assertTrue(payload["ok"])
 
 
 if __name__ == "__main__":

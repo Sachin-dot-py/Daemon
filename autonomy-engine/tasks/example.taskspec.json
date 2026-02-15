@@ -1,0 +1,22 @@
+{
+  "task_id": "example",
+  "instruction": "stay in view and stop",
+  "camera_roi": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+  "home_roi": { "x": 0.3, "y": 0.25, "w": 0.4, "h": 0.5 },
+  "safety": {
+    "max_step_ms": 800,
+    "max_episode_s": 30.0,
+    "stop_every_steps": 1,
+    "lost_visible_stop_s": 1.0
+  },
+  "policy_params": {
+    "default_speed": 0.5,
+    "default_duration_ms": 350.0,
+    "default_turn_degrees": 12.0,
+    "center_margin": 0.12,
+    "turn_duration_ms": 220.0,
+    "strafe_duration_ms": 220.0,
+    "explore_sigma": 0.12
+  }
+}
+

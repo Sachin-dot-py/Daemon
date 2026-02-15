@@ -15,6 +15,7 @@ Local multi-node runtime glue for DAEMON node endpoints.
   - `POST /execute_plan`
   - `POST /stop`
   - `GET /status`
+  - `GET /telemetry` (best-effort snapshot; requires `--telemetry` to be useful)
 
 ## Token collisions and namespacing
 - If a token appears on one node only, unqualified token routing is allowed.

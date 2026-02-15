@@ -8,6 +8,7 @@ DAEMON is an AI-native firmware-to-agent bridge with two components:
 ## Monorepo layout
 - All CLI build/generation logic is under `daemon-cli/`.
 - All desktop app logic is under `desktop-app/`.
+- Laptop-local closed-loop autonomy runner is under `autonomy-engine/`.
 
 ## How to run
 

@@ -690,6 +690,16 @@ def run_http_bridge(orchestrator: Orchestrator, host: str, port: int) -> None:
             return parsed
 
         def do_GET(self) -> None:  # noqa: N802
+            if self.path == "/telemetry":
+                self._write_json(
+                    200,
+                    {
+                        "ok": True,
+                        "telemetry_snapshot": orchestrator.telemetry_snapshot(),
+                    },
+                )
+                return
+
             if self.path != "/status":
                 self._write_json(404, {"ok": False, "error": "not_found"})
                 return
