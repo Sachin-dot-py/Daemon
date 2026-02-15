@@ -4,6 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$ROOT_DIR/desktop-app"
 
+# Load repo-root .env for local dev so the Tauri backend has OPENAI_API_KEY even when launched
+# via GUI tooling that doesn't inherit interactive shell env vars.
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ROOT_DIR/.env"
+  set +a
+fi
+
 BASE_PORT="${BASE_PORT:-7777}"
 ARM_PORT="${ARM_PORT:-7778}"
 ORCH_PORT="${ORCH_PORT:-5055}"

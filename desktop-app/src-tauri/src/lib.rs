@@ -7,7 +7,7 @@ use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::{fs::OpenOptions};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -308,9 +308,102 @@ fn append_desktop_audit_log(event: &str, payload: &Value) {
 }
 
 fn openai_api_key() -> Option<String> {
-    // Tauri GUI apps on macOS may not inherit shell env; but if launched via terminal it will.
-    // We keep this minimal: rely on OPENAI_API_KEY existing in the app environment.
-    std::env::var("OPENAI_API_KEY").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    // Tauri GUI apps on macOS often do not inherit interactive shell env vars.
+    // Best-effort: if OPENAI_API_KEY isn't present, try loading it from a repo-root .env (dev only).
+    try_load_openai_key_from_dotenv();
+    std::env::var("OPENAI_API_KEY")
+        .or_else(|_| std::env::var("OPEN_AI_API_KEY"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn dotenv_lookup(text: &str, key: &str) -> Option<String> {
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let (k, v) = line.split_once('=')?;
+        if k.trim() != key {
+            continue;
+        }
+        let mut val = v.trim().to_string();
+
+        // Strip trailing comments for unquoted values: KEY=abc # comment
+        if !(val.starts_with('"') || val.starts_with('\'')) {
+            if let Some((head, _comment)) = val.split_once('#') {
+                val = head.trim().to_string();
+            }
+        }
+        // Trim matching quotes (basic .env support).
+        if val.len() >= 2 {
+            let bytes = val.as_bytes();
+            if (bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+                || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'')
+            {
+                val = val[1..val.len() - 1].to_string();
+            }
+        }
+
+        if !val.trim().is_empty() {
+            return Some(val);
+        }
+    }
+    None
+}
+
+fn try_load_openai_key_from_dotenv() {
+    static DOTENV_TRIED: OnceLock<()> = OnceLock::new();
+    DOTENV_TRIED.get_or_init(|| {
+        let has = |k: &str| {
+            std::env::var(k)
+                .ok()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        };
+        if has("OPENAI_API_KEY") || has("OPEN_AI_API_KEY") {
+            return;
+        }
+
+        // Prefer repo-root .env (monorepo), but also try common local fallbacks.
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(repo_root) = find_repo_root() {
+            candidates.push(repo_root.join(".env"));
+            candidates.push(repo_root.join("desktop-app").join(".env"));
+            candidates.push(repo_root.join("desktop-app").join("src-tauri").join(".env"));
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            candidates.push(cwd.join(".env"));
+        }
+
+        for path in candidates {
+            if !path.exists() {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let key = dotenv_lookup(&text, "OPENAI_API_KEY")
+                .or_else(|| dotenv_lookup(&text, "OPEN_AI_API_KEY"))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let Some(v) = key {
+                // Mirror to both names to reduce config footguns across packages.
+                std::env::set_var("OPENAI_API_KEY", &v);
+                std::env::set_var("OPEN_AI_API_KEY", &v);
+                append_desktop_audit_log(
+                    "dotenv.loaded",
+                    &json!({
+                        "path": path.display().to_string(),
+                        "keys": ["OPENAI_API_KEY"]
+                    }),
+                );
+                return;
+            }
+        }
+    });
 }
 
 fn extract_first_text_field(resp: &Value) -> Option<String> {
@@ -371,6 +464,14 @@ fn task_expects_motion(task: &str) -> bool {
     let keywords = [
         "move", "drive", "go ", "forward", "backward", "reverse", "left", "right", "turn", "rotate", "strafe", "spin",
     ];
+    keywords.iter().any(|k| t.contains(k))
+}
+
+fn task_allows_stationary_success(task: &str) -> bool {
+    // Tasks that explicitly mention stopping/holding position should be allowed to "succeed"
+    // even when motion is low in the final frames.
+    let t = task.to_ascii_lowercase();
+    let keywords = [" stop", "stop ", "stopped", "halt", "hold", "stay", "remain", "park", "freeze"];
     keywords.iter().any(|k| t.contains(k))
 }
 
@@ -712,6 +813,8 @@ You may be given multiple frames (ordered oldest -> newest). Use them to infer m
 Hard constraints:\n\
 - If the robot is not clearly visible: success=false.\n\
 - If there is little/no visible motion across frames (or motion is ambiguous): success=false.\n\
+  Exception: if the task explicitly includes stopping/holding position (e.g. \"... and stop\"), then low motion can be OK\n\
+  when the robot appears to have reached the goal and is now stationary.\n\
 \n\
 Output rules:\n\
 - Return ONLY strict JSON that matches the provided schema.\n\
@@ -1194,7 +1297,7 @@ async fn critic_step(
     // Motion gating: prevent stationary hallucinations from counting as success.
     let mut motion_gate = false;
     let mut motion_gate_reason = String::new();
-    if task_expects_motion(task_to_use) && motion_score < 0.004 {
+    if task_expects_motion(task_to_use) && !task_allows_stationary_success(task_to_use) && motion_score < 0.004 {
         motion_gate = true;
         motion_gate_reason = format!("low_motion(score={motion_score:.4})");
         success = false;

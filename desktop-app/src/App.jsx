@@ -49,6 +49,18 @@ function readPromptWithMigration(key) {
   return v;
 }
 
+function defaultNodeEndpoints() {
+  const stored = readLocalStorage("daemon.nodeEndpoints");
+  if (typeof stored === "string" && stored.trim()) return stored.trim();
+
+  // Allow overriding via env for dev builds.
+  const env = import.meta.env.VITE_NODE_ENDPOINTS;
+  if (typeof env === "string" && env.trim()) return env.trim();
+
+  // Reference Pi setup (see PI_RUNBOOK.md).
+  return "base=vporto26.local:8766\narm=vporto26.local:8767\ncam=vporto26.local:8768";
+}
+
 function nowStamp() {
   return new Date().toLocaleTimeString();
 }
@@ -374,7 +386,8 @@ function App() {
   const [chartSeries, setChartSeries] = useState([]);
   const [orchestratorBaseUrl, setOrchestratorBaseUrl] = useState(readLocalStorage("daemon.orchestratorBaseUrl") || ORCH_BASE_URL);
   // Default to 8766 because 8765 is commonly used by the legacy JSON mecanum bridge.
-  const [nodeEndpoints, setNodeEndpoints] = useState("base=vporto26.local:8766");
+  // Include arm/cam defaults for the reference Pi setup (see daemon-cli/firmware-code/profiles/rc_car_pi_arduino/raspberry_pi/PI_RUNBOOK.md).
+  const [nodeEndpoints, setNodeEndpoints] = useState(defaultNodeEndpoints);
   const [orchestratorProc, setOrchestratorProc] = useState({ running: false, pid: null, httpBaseUrl: null, args: null });
   const [nodeProbeResults, setNodeProbeResults] = useState([]);
   const [hardwareBusy, setHardwareBusy] = useState(false);
@@ -501,13 +514,14 @@ function App() {
     try {
       globalThis?.localStorage?.setItem("daemon.visionMode", String(visionMode || ""));
       globalThis?.localStorage?.setItem("daemon.orchestratorBaseUrl", String(orchestratorBaseUrl || ""));
+      globalThis?.localStorage?.setItem("daemon.nodeEndpoints", String(nodeEndpoints || ""));
       globalThis?.localStorage?.setItem("daemon.taskPrompt", String(taskPrompt || ""));
       globalThis?.localStorage?.setItem("daemon.draftPrompt", String(draftPrompt || ""));
       globalThis?.localStorage?.setItem("daemon.debugMode", debugMode ? "1" : "0");
     } catch {
       // ignore
     }
-  }, [visionMode, orchestratorBaseUrl, taskPrompt, draftPrompt, debugMode]);
+  }, [visionMode, orchestratorBaseUrl, nodeEndpoints, taskPrompt, draftPrompt, debugMode]);
 
   useEffect(() => {
     refreshBackendAuditLog();
@@ -616,17 +630,39 @@ function App() {
     }
 
     setNodeProbeResults(results);
-    const firstOk = results.find((item) => item?.ok);
-    if (firstOk) {
-      const alias = String(firstOk.entry || "").split("=", 1)[0] || "base";
-      const tokens = Array.isArray(firstOk.tokens) ? firstOk.tokens.map((t) => String(t).toUpperCase()) : [];
-      setCapabilities((prev) => ({
-        ...prev,
-        base_target: alias,
-        base_fwd_token: tokens.includes("FWD") ? "FWD" : prev.base_fwd_token,
-        base_turn_token: tokens.includes("TURN") ? "TURN" : prev.base_turn_token,
-        base_strafe_token: tokens.includes("STRAFE") ? "STRAFE" : prev.base_strafe_token
-      }));
+    // Update capabilities for all probed aliases (base/arm/cam/etc).
+    const byAlias = new Map();
+    for (const item of results) {
+      const alias = String(item?.entry || "").split("=", 1)[0].trim();
+      if (!alias) continue;
+      if (!item?.ok) continue;
+      const tokens = Array.isArray(item.tokens) ? item.tokens.map((t) => String(t).toUpperCase()) : [];
+      byAlias.set(alias, tokens);
+    }
+    if (byAlias.size) {
+      setCapabilities((prev) => {
+        const next = { ...prev };
+
+        const baseAlias =
+          byAlias.has("base") ? "base" : byAlias.has(String(prev.base_target || "")) ? String(prev.base_target || "") : null;
+        if (baseAlias) {
+          const toks = byAlias.get(baseAlias) || [];
+          next.base_target = baseAlias;
+          if (toks.includes("FWD")) next.base_fwd_token = "FWD";
+          if (toks.includes("TURN")) next.base_turn_token = "TURN";
+          if (toks.includes("STRAFE")) next.base_strafe_token = "STRAFE";
+        }
+
+        const armAlias =
+          byAlias.has("arm") ? "arm" : byAlias.has(String(prev.arm_target || "")) ? String(prev.arm_target || "") : null;
+        if (armAlias) {
+          const toks = byAlias.get(armAlias) || [];
+          next.arm_target = armAlias;
+          if (toks.includes("GRIP")) next.arm_grip_token = "GRIP";
+        }
+
+        return next;
+      });
     }
 
     return results;
@@ -822,9 +858,9 @@ function App() {
     const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
     const bootstrap = async () => {
+      const nodes = parseNodeEndpoints();
+      appendTrace("bootstrap.start", { nodes });
       try {
-        const nodes = parseNodeEndpoints();
-        appendTrace("bootstrap.start", { nodes });
         const proc = await invoke("orchestrator_spawn", {
           nodes,
           httpPort: 5055,
@@ -837,7 +873,11 @@ function App() {
           setOrchestratorBaseUrl(proc.httpBaseUrl);
         }
         appendTrace("bootstrap.orchestrator.ok", { proc });
-
+      } catch (error) {
+        appendTrace("bootstrap.error", { error: String(error) });
+      } finally {
+        // Probe nodes even if orchestrator spawn failed (common on fresh machines without python deps),
+        // so we can still surface missing arm/cam wiring early.
         for (let attempt = 1; attempt <= 5; attempt += 1) {
           if (cancelled) return;
           const results = await probeNodesInternal(nodes).catch((error) => {
@@ -852,9 +892,6 @@ function App() {
           }
           await delay(1500);
         }
-      } catch (error) {
-        appendTrace("bootstrap.error", { error: String(error) });
-      } finally {
         await refreshBackendAuditLog();
       }
     };
@@ -907,6 +944,17 @@ function App() {
             `Orchestrator system_manifest is missing required token '${expected}'. ` +
               `This usually means you are pointing at the wrong orchestrator (stale process / wrong port) or base is disconnected. ` +
               `Fix: check ${orchestratorBaseUrl}/status and ensure base is connected and lists '${expected}'.`
+          );
+        }
+
+        // If the prompt asks for grabbing/gripping, fail fast when no gripper token is available.
+        const wantsGrip = /\b(grip|gripper|claw|grab|pick\s*up|pickup)\b/i.test(instructionToSend);
+        const gripTok = String(capabilities?.arm_grip_token || "GRIP").trim() || "GRIP";
+        if (wantsGrip && !toks.has(gripTok)) {
+          throw new Error(
+            `This task requires a gripper, but orchestrator system_manifest has no '${gripTok}' token. ` +
+              `Your nodes are currently: ${JSON.stringify(parseNodeEndpoints())}. ` +
+              `Fix: start/connect the claw node and include it (e.g. 'arm=vporto26.local:8767'), then click Probe Nodes.`
           );
         }
       }

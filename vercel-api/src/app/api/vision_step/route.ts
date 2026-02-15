@@ -277,10 +277,22 @@ const DEFAULT_STATE: VisionState = {
 
 const ALIGN_OFFSET_THRESHOLD = 0.07;
 const SEARCH_STEP_DEG = 12;
-const CLOSE_AREA_THRESHOLD = 0.09;
+// Fraction of frame area required to consider the target "close enough" for a grab.
+// Keep this low for small tabletop blocks; the old value (0.09) prevented reaching GRAB for small objects.
+const CLOSE_AREA_THRESHOLD_DEFAULT = 0.02;
+const CLOSE_AREA_THRESHOLD_SMALL_OBJECT = 0.0045;
 const OPENAI_MIN_CONFIDENCE = 0.35;
 const TASK_METRICS_FILE = path.join(process.cwd(), ".daemon", "vision_task_metrics.json");
 let FILE_ENV_CACHE: Record<string, string> | null = null;
+
+function closeAreaThreshold(parsed: ParsedInstruction): number {
+  const label = parsed.target.label ? canonicalLabel(parsed.target.label) : "";
+  if (!label) return CLOSE_AREA_THRESHOLD_DEFAULT;
+  if (["rectangle", "square", "cube", "box"].includes(label)) {
+    return CLOSE_AREA_THRESHOLD_SMALL_OBJECT;
+  }
+  return CLOSE_AREA_THRESHOLD_DEFAULT;
+}
 
 function logVisionTrace(event: string, correlationId: string, payload: Record<string, unknown>) {
   console.log(
@@ -457,6 +469,24 @@ function extractObjectDescriptor(selected: PerceivedObject | undefined, expected
   return null;
 }
 
+function labelsEquivalent(expectedLabel: string | null, selectedLabel: string | null): boolean {
+  if (!expectedLabel) return true;
+  if (!selectedLabel) return false;
+  if (expectedLabel === selectedLabel) return true;
+
+  const e = expectedLabel.toLowerCase().trim();
+  const s = selectedLabel.toLowerCase().trim();
+
+  // Vision models frequently call small tabletop blocks "square object" regardless of whether the user says
+  // "rectangle" or "square". Treat these as equivalent for task completion so we can advance to GRAB/DONE.
+  const flatBlock = new Set(["rectangle", "square", "square object", "rectangle object", "block", "box", "cube"]);
+  if (flatBlock.has(e) && flatBlock.has(s)) return true;
+  if (e === "rectangle" && (s.includes("square") || s.includes("rectangle"))) return true;
+  if (e === "square" && (s.includes("square") || s.includes("rectangle"))) return true;
+
+  return false;
+}
+
 function evaluateTaskValidation(
   parsed: ParsedInstruction,
   state: VisionState,
@@ -478,7 +508,7 @@ function evaluateTaskValidation(
   const motionDelta =
     Math.abs(state.verification_ctx.last_offset_abs - Math.abs(perception.offset_x)) + Math.abs(state.verification_ctx.last_area - perception.area);
   const motionOk = !baseMotionCommanded || motionScore >= 0.005 || motionDelta >= 0.003;
-  const targetLabelOk = !expectedLabel || (selectedLabel !== null && selectedLabel === expectedLabel);
+  const targetLabelOk = !expectedLabel || labelsEquivalent(expectedLabel, selectedLabel);
   const targetColorOk = !expectedColor || selectedColor === expectedColor;
   const graspIntentOk =
     nextState.stage !== "DONE" ||
@@ -1666,16 +1696,53 @@ function buildPlanAndState(
         break;
       }
 
-      if (perception.area >= CLOSE_AREA_THRESHOLD) {
-        next.stage = "GRAB";
-        policyBranch = "PICK/CLOSE";
-        notes.push("Target close enough for grab");
-        plan.push(stopStep());
+      // In pick mode, keep re-centering while we approach; otherwise the robot can drive past the target.
+      const off = perception.offset_x;
+      const offAbs = Math.abs(off);
+      const closeTh = closeAreaThreshold(parsed);
+      const centered = offAbs <= Math.max(alignTolerance, ALIGN_OFFSET_THRESHOLD);
+
+      if (offAbs > alignTolerance) {
+        const baseAllowed = allowedTokenMap?.get(caps.base_target) ?? null;
+        const canStrafe = Boolean(baseAllowed?.has(String(caps.base_strafe_token || "").toUpperCase()));
+
+        policyBranch = "PICK/APPROACH_ALIGN";
+        if (canStrafe) {
+          const dir = off > 0 ? "R" : "L";
+          notes.push("Strafing to center target");
+          plan.push(runStep(caps.base_target, caps.base_strafe_token, [dir, 0.45], 260));
+          plan.push(stopStep());
+          next.stage = "APPROACH";
+        } else {
+          const turnDeg = clamp(off * 55, -20, 20);
+          notes.push("Turning to re-center target during approach");
+          plan.push(runStep(caps.base_target, caps.base_turn_token, [Number(turnDeg.toFixed(2))], 220));
+          plan.push(stopStep());
+          next.stage = "APPROACH";
+        }
+        break;
+      }
+
+      if (perception.area >= closeTh && centered) {
+        const armAllowed = allowedTokenMap?.get(caps.arm_target) ?? null;
+        const canGrip = !allowedTokenMap || Boolean(armAllowed?.has(String(caps.arm_grip_token || "").toUpperCase()));
+        if (!canGrip) {
+          policyBranch = "PICK/NO_ARM";
+          notes.push("Target close, but no gripper node/token available; stopping");
+          plan.push(stopStep());
+          next.stage = "APPROACH";
+        } else {
+          next.stage = "GRAB";
+          policyBranch = "PICK/CLOSE";
+          notes.push(`Target close enough for grab (area=${perception.area.toFixed(3)}>=${closeTh.toFixed(3)})`);
+          plan.push(stopStep());
+        }
       } else {
         policyBranch = parsed.task_type === "avoid+approach" ? "AVOID/APPROACH" : "PICK/APPROACH";
         notes.push("Approaching target");
         plan.push(runStep(caps.base_target, caps.base_fwd_token, [0.5], 300));
         plan.push(stopStep());
+        next.stage = "ALIGN";
       }
       break;
     }
